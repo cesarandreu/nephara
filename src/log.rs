@@ -234,7 +234,7 @@ pub fn print_run_summary(
     }
     if !notable_events.is_empty() {
         log.write_line("  Notable events:");
-        for ev in notable_events.iter().take(10) {
+        for ev in notable_events.iter() {
             log.write_line(&format!("    * {}", ev));
         }
     }

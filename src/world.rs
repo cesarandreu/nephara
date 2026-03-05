@@ -565,7 +565,7 @@ impl World {
 
         let ev = format!(
             "Day {day}: {} cast intent: \"{}\" → {}",
-            self.agents[idx].name(), intent, &interpreted.primary_effect[..interpreted.primary_effect.len().min(60)]
+            self.agents[idx].name(), intent, interpreted.primary_effect
         );
         self.notable_events.push((idx, ev));
 
