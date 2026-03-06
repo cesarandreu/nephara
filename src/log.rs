@@ -83,20 +83,27 @@ pub fn time_of_day(tick_in_day: u32, night_start: u32) -> &'static str {
 // ---------------------------------------------------------------------------
 
 pub fn needs_footer(agents: &[Agent]) -> String {
-    let parts: Vec<String> = agents.iter().map(|a| {
-        let h = format_need("H", a.needs.hunger);
-        let e = format_need("E", a.needs.energy);
-        let f = format_need("F", a.needs.fun);
-        let s = format_need("S", a.needs.social);
-        let y = format_need("Y", a.needs.hygiene);
-        format!("{} [{} {} {} {} {}]", a.name(), h, e, f, s, y)
-    }).collect();
-    format!("  Needs: {}", parts.join(" | "))
+    let header = format!("  {:<12}{:>8}{:>8}{:>8}{:>8}{:>8}",
+        "Needs:", "Satiety", "Energy", "Fun", "Social", "Hygiene");
+    let mut rows = vec![header];
+    for (i, a) in agents.iter().enumerate() {
+        let name_padded = format!("{:<12}", a.name());
+        let colored_name = format!("{}", name_padded.color(color::agent_color(i)));
+        let row = format!("  {}{}{}{}{}{}",
+            colored_name,
+            fmt_need_val(a.needs.hunger,  8),
+            fmt_need_val(a.needs.energy,  8),
+            fmt_need_val(a.needs.fun,     8),
+            fmt_need_val(a.needs.social,  8),
+            fmt_need_val(a.needs.hygiene, 8),
+        );
+        rows.push(row);
+    }
+    rows.join("\n")
 }
 
-fn format_need(label: &str, value: f32) -> String {
-    let c = color::needs_color(value);
-    format!("{}", format!("{}:{:.0}", label, value).color(c))
+fn fmt_need_val(v: f32, width: usize) -> String {
+    format!("{}", format!("{:>width$.0}", v, width = width).color(color::needs_color(v)))
 }
 
 // ---------------------------------------------------------------------------

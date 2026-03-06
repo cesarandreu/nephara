@@ -19,7 +19,7 @@ pub fn build_action_schema(canonical_names: &[&str]) -> serde_json::Value {
         "properties": {
             "action":      { "type": "string", "enum": canonical_names },
             "target":      { "type": ["string", "null"] },
-            "intent":      { "type": ["string", "null"] },
+            "intent":      { "type": "string", "default": "" },
             "reason":      { "type": "string" },
             "description": { "type": "string" }
         }
@@ -359,8 +359,7 @@ pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) 
         "cast intent" | "cast_intent" => {
             let i = intent.unwrap_or("").to_string();
             if i.is_empty() {
-                tracing::warn!("cast_intent action with no intent string — treating as Wander");
-                Action::Wander
+                Action::CastIntent { intent: "I seek something I cannot quite name".to_string() }
             } else {
                 Action::CastIntent { intent: i }
             }

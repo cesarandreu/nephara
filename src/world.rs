@@ -55,7 +55,7 @@ fn tile_char(tile: TileType) -> char {
         TileType::Forest  => 'F',
         TileType::River   => '~',
         TileType::Square  => 'S',
-        TileType::Tavern  => 'T',
+        TileType::Tavern  => 'V',
         TileType::Well    => 'W',
         TileType::Meadow  => 'M',
         TileType::Home(_) => 'h',
@@ -1004,7 +1004,7 @@ NEARBY: {nearby}
 
 VIEWPORT (you are [X]):
 {viewport}
-(legend: F=Forest ~=River S=Square T=Tavern W=Well M=Meadow h=Home X=you)
+(legend: F=Forest ~=River S=Square V=Tavern W=Well M=Meadow h=Home X=you)
 {region_note}
 
 RECENT MEMORY (newest first):
@@ -1471,7 +1471,71 @@ Do not use quotation marks. Do not use names in the sentence. Just the summary."
         }).collect::<Vec<_>>().join("  ");
         lines.push(format!(" {}", roster));
 
-        lines.join("\n")
+        // Attach legend to the right side of map rows
+        let legend = self.build_map_legend();
+        let result: Vec<String> = lines.iter().enumerate().map(|(i, map_line)| {
+            match legend.get(i) {
+                Some(leg) => format!("{}   {}", map_line, leg),
+                None      => map_line.clone(),
+            }
+        }).collect();
+        result.join("\n")
+    }
+
+    // -----------------------------------------------------------------------
+    // Map legend (appended to right side of rendered map)
+    // -----------------------------------------------------------------------
+
+    fn build_map_legend(&self) -> Vec<String> {
+        let mut legend: Vec<String> = Vec::new();
+
+        // TILES section
+        legend.push(format!("{}", "TILES".bold()));
+        let tiles: &[(char, TileType, &str)] = &[
+            ('.', TileType::Open,    "Open Field"),
+            ('F', TileType::Forest,  "Forest"),
+            ('~', TileType::River,   "River"),
+            ('S', TileType::Square,  "Village Square"),
+            ('V', TileType::Tavern,  "Tavern"),
+            ('W', TileType::Well,    "Village Well"),
+            ('M', TileType::Meadow,  "Eastern Meadow"),
+            ('h', TileType::Home(0), "Home"),
+        ];
+        for (ch, tile, label) in tiles {
+            legend.push(format!("{} {}",
+                ch.to_string().color(color::tile_color(*tile)),
+                label));
+        }
+
+        legend.push(String::new());
+
+        // NODES section
+        legend.push(format!("{}", "NODES".bold()));
+        let nodes: &[(char, colored::Color, &str)] = &[
+            ('✿', colored::Color::BrightMagenta, "Berry Bush"),
+            ('≋', colored::Color::BrightCyan,    "Fish School"),
+            ('✦', colored::Color::BrightRed,     "Campfire"),
+            ('✜', colored::Color::BrightGreen,   "Herb Patch"),
+            ('·', colored::Color::BrightBlack,   "Depleted"),
+        ];
+        for (ch, col, label) in nodes {
+            legend.push(format!("{} {}",
+                ch.to_string().color(*col),
+                label));
+        }
+
+        legend.push(String::new());
+
+        // AGENTS section
+        legend.push(format!("{}", "AGENTS".bold()));
+        for (i, a) in self.agents.iter().enumerate() {
+            let initial = a.name().chars().next().unwrap_or('?').to_string();
+            legend.push(format!("{} {}",
+                initial.color(color::agent_color(i)).bold(),
+                a.name().color(color::agent_color(i))));
+        }
+
+        legend
     }
 
     // -----------------------------------------------------------------------
