@@ -181,7 +181,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "mock" | "claude" => Arc::clone(&backend),
         _ => match &cfg.llm.smart_model.clone() {
             Some(model) => {
-                let smart = OllamaBackend::new(cfg.llm.ollama_url.clone(), model.clone(), cfg.llm.temperature);
+                let smart_url = cfg.llm.smart_ollama_url.clone()
+                    .unwrap_or_else(|| cfg.llm.ollama_url.clone());
+                let smart = OllamaBackend::new(smart_url, model.clone(), cfg.llm.temperature);
                 match smart.health_check().await {
                     Ok(_)  => {
                         info!("Smart model '{}' available for planning/reflection/desires", model);

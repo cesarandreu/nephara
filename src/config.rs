@@ -110,6 +110,7 @@ pub struct LlmConfig {
     pub planning_max_tokens:    u32,
     pub reflection_max_tokens:  u32,
     pub smart_model:            Option<String>,
+    pub smart_ollama_url:       Option<String>,
     pub narrator_max_tokens:    u32,
     pub desires_max_tokens:     u32,
     pub oracle_max_tokens:      u32,
