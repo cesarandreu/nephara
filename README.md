@@ -65,22 +65,41 @@ cargo run -- --llm-url http://other-host:11434
 nephara [OPTIONS]
 
 Options:
-  --ticks <N>       Ticks to simulate (default: 144, i.e. 3 in-game days)
+  --ticks <N>       Ticks to simulate (default: 96, i.e. 2 in-game days)
   --llm <BACKEND>   LLM backend: ollama (default) or mock
   --llm-url <URL>   Override Ollama URL (default: http://localhost:11434)
   --model <MODEL>   Override model name (default: gemma3:4b)
   --config <PATH>   Config file (default: config/world.toml)
   --souls <DIR>     Soul seeds directory (default: souls/)
   --seed <N>        Deterministic seed (random if omitted, logged at startup)
+  --no-tui          Use streaming terminal output instead of fullscreen TUI
+  --debug-llm       Write all LLM prompts and responses to runs/{id}/llm_debug.md
   --verbose         Enable debug logging
 ```
+
+## TUI Mode
+
+By default, Nephara runs in a fullscreen terminal UI (ratatui). The screen is split into three panels: a live map (left), a tick event log (right), and a needs bar for each agent (bottom).
+
+Key bindings:
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Scroll event log down / up |
+| `[` / `]` | Jump to previous / next tick |
+| `Space` | Expand selected entry |
+| `q` | Quit |
+
+Use `--no-tui` for the original streaming output (useful for piping or scripting).
 
 ## Output
 
 Each run creates a directory under `runs/` containing:
 
-- `tick_log.txt` — the full scrolling narrative (same as stdout)
+- `tick_log.txt` — the full scrolling narrative
 - `state_dump_tick_NNNN.json` — world snapshots every N ticks (configurable)
+- `introspection.md` — agent desire/intention summaries each tick
+- `llm_debug.md` — all LLM prompts and responses (only with `--debug-llm`)
 
 Agent journals are appended to `souls/*.journal.md` after each run.
 
@@ -89,6 +108,8 @@ Agent journals are appended to `souls/*.journal.md` after each run.
 All tunable parameters live in `config/world.toml` — need decay rates, action DCs, restoration amounts, tick counts, LLM settings. No recompilation needed to tweak values.
 
 ## Development Commands
+
+These commands run inside the `nix develop` shell, which provides `cargo` and all dependencies. Non-NixOS users with Rust installed can run `cargo` directly, but must also install `pkg-config` and OpenSSL dev headers (`libssl-dev` on Debian/Ubuntu, `openssl-devel` on Fedora).
 
 ```sh
 # Build
@@ -136,6 +157,20 @@ RUST_LOG=debug cargo run -- --llm mock --ticks 6 --seed 42
 # Live run: confirm Ollama is ready, then watch LLM round-trips
 RUST_LOG=info,llm=debug cargo run -- --ticks 6
 ```
+
+## Adding New Agents
+
+Use the summoning script to generate the ritual prompt:
+
+```sh
+bash scripts/summon.sh
+```
+
+Copy the output and paste it into Claude Opus 4.6. The model will respond with a complete soul seed. Review it (verify attribute scores sum to 30), then save it to `souls/<name>.seed.md`. See `rituals/summoning.md` for full Archwizard's notes.
+
+## Interacting with Agents
+
+To send a message to an agent, write any text to `souls/<name>.oracle_responses.md`. The next time the agent is at the Temple, they will receive it as an Oracle reading (a private LLM reflection), the file is cleared, and the response is archived to `souls/<name>.oracle_history.md`.
 
 ## Project Structure
 

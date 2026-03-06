@@ -159,6 +159,101 @@ impl LlmBackend for OllamaBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Claude API backend
+// ---------------------------------------------------------------------------
+
+pub struct ClaudeBackend {
+    api_key: String,
+    model:   String,
+    client:  reqwest::Client,
+}
+
+impl ClaudeBackend {
+    pub fn new(model: String) -> Result<Self> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
+        Ok(ClaudeBackend { api_key, model, client: reqwest::Client::new() })
+    }
+}
+
+#[derive(Serialize)]
+struct ClaudeRequest<'a> {
+    model:      &'a str,
+    max_tokens: u32,
+    messages:   Vec<ClaudeMessage<'a>>,
+}
+
+#[derive(Serialize)]
+struct ClaudeMessage<'a> {
+    role:    &'static str,
+    content: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ClaudeResponse {
+    content: Vec<ClaudeContent>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    text:         Option<String>,
+}
+
+#[async_trait]
+impl LlmBackend for ClaudeBackend {
+    async fn generate(
+        &self,
+        prompt:     &str,
+        max_tokens: u32,
+        _seed:      Option<u64>,
+        _schema:    Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let url  = "https://api.anthropic.com/v1/messages";
+        let body = ClaudeRequest {
+            model:      &self.model,
+            max_tokens,
+            messages:   vec![ClaudeMessage { role: "user", content: prompt }],
+        };
+
+        debug!(target: "llm", model = %self.model, max_tokens = max_tokens,
+               prompt_chars = prompt.len(), "Claude request");
+
+        let resp = self.client
+            .post(url)
+            .header("x-api-key",          &self.api_key)
+            .header("anthropic-version",   "2023-06-01")
+            .header("content-type",        "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Claude HTTP error: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text   = resp.text().await.unwrap_or_default();
+            return Err(format!("Claude API returned {}: {}", status, text).into());
+        }
+
+        let claude_resp: ClaudeResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Claude JSON parse error: {}", e))?;
+
+        let text = claude_resp.content
+            .into_iter()
+            .filter(|c| c.content_type == "text")
+            .filter_map(|c| c.text)
+            .next()
+            .ok_or("No text content in Claude response")?;
+
+        debug!(target: "llm", chars = text.len(), response = %text, "Claude response");
+        Ok(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock backend — fully deterministic, returns plausible JSON actions
 // ---------------------------------------------------------------------------
 

@@ -1,4 +1,13 @@
 /target
 /runs
+world-sim-mvp-spec.md
 .claude/
 flake.lock
+
+# Soul runtime files — generated per-run; personal data, not for forked repos
+souls/*.journal.md
+souls/*.story.md
+souls/*.wishes.md
+souls/*.prayers.md
+souls/*.oracle_responses.md
+souls/*.oracle_history.md

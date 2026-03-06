@@ -106,7 +106,8 @@ night_dc_bonus = 4   # Added to Forage/Explore DCs at night
 buffer_size = 20
 
 [simulation]
-default_run_ticks    = 144   # 3 days
+# default_run_ticks    = 144   # 3 days
+default_run_ticks    = 96    # 2 days (for faster iteration)
 state_dump_interval  = 48    # Dump every in-game day
 
 [llm]

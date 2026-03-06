@@ -1,0 +1,827 @@
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::time::Duration;
+
+use crossterm::event::{
+    self, Event, KeyCode, KeyModifiers,
+    EnableMouseCapture, DisableMouseCapture,
+    MouseEvent, MouseEventKind, MouseButton,
+};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Terminal;
+use tokio::sync::mpsc;
+
+use crate::color as ccolor;
+use crate::tui_event::{AgentNeedsSnapshot, MapCell, TickEntrySnapshot, TuiEvent};
+
+// ---------------------------------------------------------------------------
+// Log entry types
+// ---------------------------------------------------------------------------
+
+pub enum DayBoundaryKind {
+    MorningIntention,
+    EveningDesire,
+    EveningReflection,
+}
+
+pub enum LogEntry {
+    TickHeader {
+        tick:        u32,
+        day:         u32,
+        time_of_day: &'static str,
+    },
+    AgentAction(TickEntrySnapshot),
+    DayBoundary {
+        kind:       DayBoundaryKind,
+        agent_id:   usize,
+        agent_name: String,
+        day:        u32,
+        text:       String,
+    },
+    SimComplete {
+        total_ticks:    u32,
+        magic_count:    u32,
+        notable:        Vec<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// TuiApp
+// ---------------------------------------------------------------------------
+
+pub struct TuiApp {
+    map_cells:            Vec<Vec<MapCell>>,
+    tick_maps:            HashMap<u32, Vec<Vec<MapCell>>>,
+    displayed_tick:       u32,
+    log_entries:          Vec<LogEntry>,
+    agent_needs:          Vec<AgentNeedsSnapshot>,
+    agent_count:          usize,
+    tick:                 u32,
+    day:                  u32,
+    time_of_day:          &'static str,
+    total_ticks:          u32,
+    seed:                 u64,
+    backend_name:         String,
+    scroll_offset:        usize,
+    selected:             usize,
+    expanded:             HashSet<usize>,
+    is_complete:          bool,
+    should_quit:          bool,
+    roster:               Vec<(String, Color)>,
+    show_legend:          bool,
+    // Dynamic wrap / hit-testing state (updated each frame by render_log)
+    log_wrap_width:       usize,
+    log_inner_area:       Rect,
+    log_rendered_scroll:  usize,
+}
+
+impl TuiApp {
+    pub fn new(
+        agent_count:  usize,
+        total_ticks:  u32,
+        seed:         u64,
+        backend_name: String,
+        roster:       Vec<(String, Color)>,
+    ) -> Self {
+        TuiApp {
+            map_cells:           vec![vec![], vec![]],
+            tick_maps:           HashMap::new(),
+            displayed_tick:      0,
+            log_entries:         Vec::new(),
+            agent_needs:         Vec::new(),
+            agent_count,
+            tick:                0,
+            day:                 1,
+            time_of_day:         "Dawn",
+            total_ticks,
+            seed,
+            backend_name,
+            scroll_offset:       0,
+            selected:            0,
+            expanded:            HashSet::new(),
+            is_complete:         false,
+            should_quit:         false,
+            roster,
+            show_legend:         false,
+            log_wrap_width:      60,
+            log_inner_area:      Rect::default(),
+            log_rendered_scroll: 0,
+        }
+    }
+
+    fn process_event(&mut self, ev: TuiEvent) {
+        match ev {
+            TuiEvent::TickStart { tick, day, time_of_day } => {
+                self.tick         = tick;
+                self.day          = day;
+                self.time_of_day  = time_of_day;
+                self.displayed_tick = tick;
+                self.log_entries.push(LogEntry::TickHeader { tick, day, time_of_day });
+            }
+            TuiEvent::MapUpdate(cells) => {
+                self.tick_maps.insert(self.tick, cells.clone());
+                self.map_cells = cells;
+            }
+            TuiEvent::NeedsUpdate(snap) => { self.agent_needs = snap; }
+            TuiEvent::AgentAction(snap) => {
+                self.log_entries.push(LogEntry::AgentAction(snap));
+                self.scroll_to_bottom();
+            }
+            TuiEvent::MorningIntention { agent_id, agent_name, day, text } => {
+                self.log_entries.push(LogEntry::DayBoundary {
+                    kind: DayBoundaryKind::MorningIntention,
+                    agent_id, agent_name, day, text,
+                });
+                self.scroll_to_bottom();
+            }
+            TuiEvent::EveningDesire { agent_id, agent_name, day, text } => {
+                self.log_entries.push(LogEntry::DayBoundary {
+                    kind: DayBoundaryKind::EveningDesire,
+                    agent_id, agent_name, day, text,
+                });
+                self.scroll_to_bottom();
+            }
+            TuiEvent::EveningReflection { agent_id, agent_name, day, text } => {
+                self.log_entries.push(LogEntry::DayBoundary {
+                    kind: DayBoundaryKind::EveningReflection,
+                    agent_id, agent_name, day, text,
+                });
+                self.scroll_to_bottom();
+            }
+            TuiEvent::SimulationComplete { total_ticks, magic_count, notable_events } => {
+                self.log_entries.push(LogEntry::SimComplete {
+                    total_ticks, magic_count, notable: notable_events,
+                });
+                self.is_complete = true;
+                self.scroll_to_bottom();
+            }
+            TuiEvent::SimulationError(msg) => {
+                self.log_entries.push(LogEntry::SimComplete {
+                    total_ticks: self.tick,
+                    magic_count: 0,
+                    notable: vec![format!("ERROR: {}", msg)],
+                });
+                self.is_complete = true;
+            }
+        }
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = usize::MAX;
+        self.selected = self.log_entries.len().saturating_sub(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Line-count helpers for scroll/selection tracking
+    // -----------------------------------------------------------------------
+
+    /// Returns the number of rendered lines for a single log entry.
+    fn entry_line_count(&self, idx: usize, entry: &LogEntry) -> usize {
+        let is_expanded  = self.expanded.contains(&idx);
+        let wrap_width   = self.log_wrap_width;
+        match entry {
+            LogEntry::TickHeader { .. } => 1,
+            LogEntry::AgentAction(snap) => {
+                let mut count = 1; // header line
+                if snap.prayer_text.is_some() { count += 1; }
+                if !snap.outcome_line.is_empty() {
+                    let wrapped = wrap_text(&snap.outcome_line, wrap_width);
+                    if is_expanded {
+                        count += wrapped.len();
+                    } else {
+                        count += 2.min(wrapped.len());
+                        if wrapped.len() > 2 { count += 1; } // "[+N more]" line
+                    }
+                }
+                count
+            }
+            LogEntry::DayBoundary { text, .. } => {
+                let wrapped = wrap_text(text, wrap_width);
+                let mut count = 1; // header line
+                if is_expanded {
+                    count += wrapped.len();
+                } else {
+                    count += 3.min(wrapped.len());
+                    if wrapped.len() > 3 { count += 1; } // "[+N more]" line
+                }
+                count
+            }
+            LogEntry::SimComplete { notable, .. } => {
+                4 + if notable.is_empty() { 0 } else { 1 + notable.len() }
+            }
+        }
+    }
+
+    /// Returns the first rendered line index for the entry at `target_idx`.
+    fn entry_first_line(&self, target_idx: usize) -> usize {
+        let mut line = 0;
+        for (idx, entry) in self.log_entries.iter().enumerate() {
+            if idx == target_idx { return line; }
+            line += self.entry_line_count(idx, entry);
+        }
+        line
+    }
+
+    /// Returns the entry index that owns the given rendered line.
+    fn entry_at_line(&self, line: usize) -> usize {
+        let mut current = 0;
+        for (idx, entry) in self.log_entries.iter().enumerate() {
+            let count = self.entry_line_count(idx, entry);
+            if line < current + count {
+                return idx;
+            }
+            current += count;
+        }
+        self.log_entries.len().saturating_sub(1)
+    }
+
+    // -----------------------------------------------------------------------
+    // Input
+    // -----------------------------------------------------------------------
+
+    /// Toggle expand for expandable entries only; TickHeader and SimComplete are skipped.
+    fn toggle_expand(&mut self, idx: usize) {
+        if idx >= self.log_entries.len() { return; }
+        match &self.log_entries[idx] {
+            LogEntry::AgentAction(_) | LogEntry::DayBoundary { .. } => {
+                if self.expanded.contains(&idx) {
+                    self.expanded.remove(&idx);
+                } else {
+                    self.expanded.insert(idx);
+                }
+            }
+            _ => {} // TickHeader and SimComplete have no expandable body
+        }
+    }
+
+    fn handle_input(&mut self, key: crossterm::event::KeyEvent) {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => { self.should_quit = true; }
+            (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                self.selected = self.entry_at_line(self.scroll_offset);
+            }
+            (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                self.selected = self.entry_at_line(self.scroll_offset);
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) | (_, KeyCode::PageDown) => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+                self.selected = self.entry_at_line(self.scroll_offset);
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) | (_, KeyCode::PageUp) => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.selected = self.entry_at_line(self.scroll_offset);
+            }
+            (_, KeyCode::Char('G')) => {
+                self.scroll_offset = usize::MAX;
+                self.selected = self.log_entries.len().saturating_sub(1);
+            }
+            (_, KeyCode::Char('[')) => {
+                let current = self.selected;
+                if let Some(prev) = self.log_entries[..current]
+                    .iter()
+                    .rposition(|e| matches!(e, LogEntry::TickHeader { .. }))
+                {
+                    self.selected = prev;
+                    self.scroll_offset = self.entry_first_line(prev);
+                    if let LogEntry::TickHeader { tick, .. } = &self.log_entries[prev] {
+                        self.displayed_tick = *tick;
+                    }
+                }
+            }
+            (_, KeyCode::Char(']')) => {
+                let current = self.selected;
+                if let Some(next) = self.log_entries[current + 1..]
+                    .iter()
+                    .position(|e| matches!(e, LogEntry::TickHeader { .. }))
+                {
+                    let next_idx = current + 1 + next;
+                    self.selected = next_idx;
+                    self.scroll_offset = self.entry_first_line(next_idx);
+                    if let LogEntry::TickHeader { tick, .. } = &self.log_entries[next_idx] {
+                        self.displayed_tick = *tick;
+                    }
+                }
+            }
+            (_, KeyCode::Enter) | (_, KeyCode::Char(' ')) => {
+                self.toggle_expand(self.selected);
+            }
+            (_, KeyCode::Char('l')) => { self.show_legend = !self.show_legend; }
+            _ => {}
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_add(3);
+                self.selected = self.entry_at_line(self.scroll_offset);
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                self.selected = self.entry_at_line(self.scroll_offset);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let area = self.log_inner_area;
+                if mouse.column >= area.x
+                    && mouse.column < area.x + area.width
+                    && mouse.row >= area.y
+                    && mouse.row < area.y + area.height
+                {
+                    let rel_row  = (mouse.row - area.y) as usize;
+                    let abs_line = self.log_rendered_scroll + rel_row;
+                    let entry_idx = self.entry_at_line(abs_line);
+                    self.selected     = entry_idx;
+                    self.scroll_offset = abs_line;
+                    self.toggle_expand(entry_idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Render
+    // -----------------------------------------------------------------------
+
+    fn draw(&mut self, f: &mut ratatui::Frame) {
+        let area = f.area();
+
+        // Outer layout: title | main | needs
+        // borders(2) + header(1) + agents(N)
+        let needs_height = 3 + self.agent_count as u16;
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(needs_height),
+            ])
+            .split(area);
+
+        // Title bar
+        let status = if self.is_complete { "DONE" } else { "RUNNING" };
+        let title_text = format!(
+            " NEPHARA  seed:{}  tick:{}/{}  Day {}  {}  [{}]  {}",
+            self.seed, self.tick, self.total_ticks,
+            self.day, self.time_of_day, self.backend_name, status
+        );
+        let title = Paragraph::new(title_text)
+            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        f.render_widget(title, outer[0]);
+
+        // Main area: map | log
+        let main = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(69),
+                Constraint::Min(0),
+            ])
+            .split(outer[1]);
+
+        self.render_map(f, main[0]);
+        self.render_log(f, main[1]);
+        self.render_needs(f, outer[2]);
+    }
+
+    fn render_map(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let map_title = if self.show_legend { " MAP  [l: hide] " } else { " MAP  [l: legend] " };
+        let block = Block::default()
+            .title(map_title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        let cells = self.tick_maps.get(&self.displayed_tick).unwrap_or(&self.map_cells);
+
+        if !cells.is_empty() && !cells[0].is_empty() {
+            for row_cells in cells {
+                let mut spans: Vec<Span> = Vec::new();
+                for (ci, cell) in row_cells.iter().enumerate() {
+                    let style = if cell.bold {
+                        Style::default().fg(cell.color).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(cell.color)
+                    };
+                    spans.push(Span::styled(cell.ch.to_string(), style));
+                    if ci + 1 < row_cells.len() {
+                        spans.push(Span::raw(" "));
+                    }
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+
+        lines.push(Line::raw(""));
+        for (name, color) in &self.roster {
+            let initial = name.chars().next().unwrap_or('?').to_string();
+            let mut spans = vec![
+                Span::styled(initial, Style::default().fg(*color).add_modifier(Modifier::BOLD)),
+                Span::raw(" "),
+                Span::styled(name.clone(), Style::default().fg(*color)),
+            ];
+            if let Some(snap) = self.agent_needs.iter().find(|s| &s.agent_name == name) {
+                spans.push(Span::raw(format!("  [{:.0}/{:.0}/{:.0}]",
+                    snap.hunger, snap.energy, snap.fun)));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        if self.show_legend {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "TILES",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            )));
+            let tile_legend: &[(&str, Color, &str)] = &[
+                (".", Color::DarkGray,     "Open"),
+                ("F", Color::Green,        "Forest"),
+                ("~", Color::Blue,         "River"),
+                ("S", Color::Yellow,       "Square"),
+                ("V", Color::LightYellow,  "Tavern"),
+                ("W", Color::Cyan,         "Well"),
+                ("M", Color::LightGreen,   "Meadow"),
+                ("h", Color::Magenta,      "Home"),
+                ("P", Color::LightMagenta, "Temple"),
+            ];
+            for (ch, color, label) in tile_legend {
+                lines.push(Line::from(vec![
+                    Span::styled((*ch).to_string(), Style::default().fg(*color)),
+                    Span::raw(format!(" {}", label)),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "RESOURCES",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            )));
+            let res_legend: &[(&str, Color, &str)] = &[
+                ("✿", Color::LightMagenta, "Berries"),
+                ("≋", Color::LightCyan,    "Fish"),
+                ("✦", Color::LightRed,     "Campfire"),
+                ("✜", Color::LightGreen,   "Herbs"),
+                ("·", Color::DarkGray,     "Depleted"),
+            ];
+            for (ch, color, label) in res_legend {
+                lines.push(Line::from(vec![
+                    Span::styled((*ch).to_string(), Style::default().fg(*color)),
+                    Span::raw(format!(" {}", label)),
+                ]));
+            }
+        }
+
+        let para = Paragraph::new(lines);
+        f.render_widget(para, inner);
+    }
+
+    fn render_log(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let block = Block::default()
+            .title(" EVENT LOG  [j/k scroll  [ ] jump  Space expand  q quit] ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // Update dynamic wrap width and area for mouse hit-testing
+        let wrap_width = (inner.width as usize).saturating_sub(6).max(20);
+        self.log_wrap_width = wrap_width;
+        self.log_inner_area = inner;
+
+        let log_height  = inner.height as usize;
+        let flat        = self.build_log_lines();
+        let total_lines = flat.len();
+
+        let max_scroll  = total_lines.saturating_sub(log_height);
+        let scroll      = self.scroll_offset.min(max_scroll);
+        self.log_rendered_scroll = scroll;
+
+        let para = Paragraph::new(flat)
+            .scroll((scroll as u16, 0));
+        f.render_widget(para, inner);
+    }
+
+    fn render_needs(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let block = Block::default()
+            .title(" NEEDS ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let header = Line::from(vec![
+            Span::raw(format!("{:<12}", "Agent")),
+            Span::styled(format!("{:>8}", "Satiety"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>8}", "Energy"),  Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>8}", "Fun"),      Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>8}", "Social"),   Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>8}", "Hygiene"),  Style::default().fg(Color::DarkGray)),
+        ]);
+
+        let mut lines = vec![header];
+        for snap in &self.agent_needs {
+            let name_color = self.roster.iter()
+                .find(|(n, _)| n == &snap.agent_name)
+                .map(|(_, c)| *c)
+                .unwrap_or(Color::White);
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<12}", snap.agent_name),
+                    Style::default().fg(name_color)),
+                need_span(snap.hunger,  8),
+                need_span(snap.energy,  8),
+                need_span(snap.fun,     8),
+                need_span(snap.social,  8),
+                need_span(snap.hygiene, 8),
+            ]));
+        }
+
+        let para = Paragraph::new(lines);
+        f.render_widget(para, inner);
+    }
+
+    // -----------------------------------------------------------------------
+    // Build flat log lines for the event log panel
+    // -----------------------------------------------------------------------
+
+    fn build_log_lines(&self) -> Vec<Line<'static>> {
+        let mut out: Vec<Line<'static>> = Vec::new();
+        let wrap_width = self.log_wrap_width;
+
+        for (idx, entry) in self.log_entries.iter().enumerate() {
+            let is_selected = idx == self.selected;
+            let is_expanded = self.expanded.contains(&idx);
+
+            match entry {
+                LogEntry::TickHeader { tick, day, time_of_day } => {
+                    let text = format!(
+                        "━━━ TICK {} │ Day {} │ {} ━━━",
+                        tick, day, time_of_day
+                    );
+                    let style = Style::default()
+                        .fg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD);
+                    let bg = if is_selected {
+                        Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+                    } else {
+                        style
+                    };
+                    out.push(Line::from(Span::styled(text, bg)));
+                }
+
+                LogEntry::AgentAction(snap) => {
+                    let agent_color = agent_color_for_id(snap.agent_id);
+                    let loc_color   = location_rat_color(&snap.location);
+
+                    let header_bg = if is_selected {
+                        Style::default().bg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    };
+
+                    let pos_str = format!("({},{})", snap.agent_pos.0, snap.agent_pos.1);
+                    let mut header_spans = vec![
+                        Span::styled(
+                            format!("[{:<10}]", snap.agent_name),
+                            Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" @ "),
+                        Span::styled(
+                            format!("{:<16}", snap.location),
+                            Style::default().fg(loc_color),
+                        ),
+                        Span::raw(format!(" {} │ ", pos_str)),
+                        Span::raw(snap.action_line.clone()),
+                    ];
+
+                    if let Some(ref tier) = snap.outcome_tier_label {
+                        header_spans.push(Span::raw(" │ "));
+                        header_spans.push(Span::styled(
+                            tier.clone(),
+                            Style::default().fg(tier_rat_color(tier)),
+                        ));
+                    }
+
+                    out.push(Line::from(header_spans).patch_style(header_bg));
+
+                    if let Some(ref prayer) = snap.prayer_text {
+                        out.push(Line::from(Span::styled(
+                            format!("  \"{}\"", prayer),
+                            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+
+                    if !snap.outcome_line.is_empty() {
+                        let wrapped = wrap_text(&snap.outcome_line, wrap_width);
+                        let limit = if is_expanded { wrapped.len() } else { 2.min(wrapped.len()) };
+                        for line in wrapped.iter().take(limit) {
+                            out.push(Line::from(Span::styled(
+                                format!("  > {}", line),
+                                Style::default().fg(Color::Gray),
+                            )));
+                        }
+                        if !is_expanded && wrapped.len() > 2 {
+                            out.push(Line::from(Span::styled(
+                                format!("  [+{} more lines — Space to expand]", wrapped.len() - 2),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                    }
+                }
+
+                LogEntry::DayBoundary { kind, agent_id, agent_name, day, text } => {
+                    let agent_color = agent_color_for_id(*agent_id);
+                    let (icon, label, color) = match kind {
+                        DayBoundaryKind::MorningIntention  => ("☀", "Morning",    Color::LightYellow),
+                        DayBoundaryKind::EveningDesire     => ("★", "Desire",     Color::LightMagenta),
+                        DayBoundaryKind::EveningReflection => ("✎", "Reflection", Color::LightCyan),
+                    };
+
+                    let header_bg = if is_selected {
+                        Style::default().bg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    };
+
+                    out.push(Line::from(vec![
+                        Span::styled(icon, Style::default().fg(color)),
+                        Span::raw(" "),
+                        Span::styled(agent_name.clone(), Style::default().fg(agent_color).add_modifier(Modifier::BOLD)),
+                        Span::raw(format!(" — Day {} — ", day)),
+                        Span::styled(label, Style::default().fg(color)),
+                    ]).patch_style(header_bg));
+
+                    let wrapped = wrap_text(text, wrap_width);
+                    let limit = if is_expanded { wrapped.len() } else { 3.min(wrapped.len()) };
+                    for line in wrapped.iter().take(limit) {
+                        out.push(Line::from(Span::styled(
+                            format!("  {}", line),
+                            Style::default().fg(Color::Gray),
+                        )));
+                    }
+                    if !is_expanded && wrapped.len() > 3 {
+                        out.push(Line::from(Span::styled(
+                            format!("  [+{} more — Space to expand]", wrapped.len() - 3),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+
+                LogEntry::SimComplete { total_ticks, magic_count, notable } => {
+                    let days = total_ticks / 48;
+                    out.push(Line::from(Span::styled(
+                        "═".repeat(50),
+                        Style::default().fg(Color::LightGreen),
+                    )));
+                    out.push(Line::from(Span::styled(
+                        format!("  SIMULATION COMPLETE — {} days ({} ticks)  Magic: {}",
+                            days, total_ticks, magic_count),
+                        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+                    )));
+                    if !notable.is_empty() {
+                        out.push(Line::from(Span::styled(
+                            "  Notable events:",
+                            Style::default().fg(Color::LightGreen),
+                        )));
+                        for ev in notable {
+                            out.push(Line::from(Span::styled(
+                                format!("    * {}", ev),
+                                Style::default().fg(Color::Green),
+                            )));
+                        }
+                    }
+                    out.push(Line::from(Span::styled(
+                        "  Press q to exit.",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    out.push(Line::from(Span::styled(
+                        "═".repeat(50),
+                        Style::default().fg(Color::LightGreen),
+                    )));
+                }
+            }
+        }
+
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // Main run loop
+    // -----------------------------------------------------------------------
+
+    pub fn run(&mut self, mut rx: mpsc::Receiver<TuiEvent>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        enable_raw_mode().map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let backend  = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let result = self.event_loop(&mut terminal, &mut rx);
+
+        // Always cleanup even on error
+        let _ = disable_raw_mode();
+        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = terminal.show_cursor();
+
+        result
+    }
+
+    fn event_loop(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        rx:       &mut mpsc::Receiver<TuiEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        loop {
+            // Drain pending events
+            loop {
+                match rx.try_recv() {
+                    Ok(ev)  => self.process_event(ev),
+                    Err(_)  => break,
+                }
+            }
+
+            terminal.draw(|f| self.draw(f))
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+            if self.should_quit {
+                break;
+            }
+
+            if event::poll(Duration::from_millis(16))
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+            {
+                match event::read()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                {
+                    Event::Key(k)   => self.handle_input(k),
+                    Event::Mouse(m) => self.handle_mouse(m),
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for segment in text.split('\n') {
+        let segment = segment.trim();
+        if segment.is_empty() { continue; }
+        let mut current = String::new();
+        for word in segment.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.len() + 1 + word.len() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                out.push(current.clone());
+                current = word.to_string();
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+    if out.is_empty() {
+        out.push(text.to_string());
+    }
+    out
+}
+
+fn need_span(v: f32, width: usize) -> Span<'static> {
+    let color = ccolor::to_ratatui_color(ccolor::needs_color(v));
+    Span::styled(
+        format!("{:>width$.0}", v, width = width),
+        Style::default().fg(color),
+    )
+}
+
+fn agent_color_for_id(id: usize) -> Color {
+    ccolor::to_ratatui_color(ccolor::agent_color(id))
+}
+
+fn location_rat_color(loc: &str) -> Color {
+    ccolor::to_ratatui_color(ccolor::location_color(loc))
+}
+
+fn tier_rat_color(tier: &str) -> Color {
+    ccolor::to_ratatui_color(ccolor::tier_color(tier))
+}

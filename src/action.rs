@@ -271,6 +271,26 @@ pub fn action_cfg_and_attr<'a>(action: &Action, config: &'a Config) -> (&'a Acti
 }
 
 // ---------------------------------------------------------------------------
+// Strip thinking-model tags
+// ---------------------------------------------------------------------------
+
+/// Remove `<think>...</think>` blocks emitted by chain-of-thought models
+/// (e.g. qwen3) so the parsers below only see the actual JSON payload.
+pub fn strip_thinking_tags(s: &str) -> String {
+    let mut result = s.to_string();
+    loop {
+        match (result.find("<think>"), result.find("</think>")) {
+            (Some(start), Some(end)) if end > start => {
+                let close_end = end + "</think>".len();
+                result = format!("{}{}", &result[..start], &result[close_end..]);
+            }
+            _ => break,
+        }
+    }
+    result.trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Parse LLM response JSON into an Action
 // ---------------------------------------------------------------------------
 
@@ -286,6 +306,8 @@ struct ActionResponse {
 /// Cascading parser: JSON → code-fence extraction → regex → Wander default.
 /// Returns (action, reason, description).
 pub fn parse_response(raw: &str) -> (Action, Option<String>, Option<String>) {
+    let stripped = strip_thinking_tags(raw);
+    let raw = stripped.as_str();
     // 1. Try direct JSON parse
     if let Some(t) = try_parse_json(raw) {
         debug!(target: "action", action = ?t.0, "Action parsed from LLM output");
@@ -344,6 +366,7 @@ fn extract_action_field(s: &str) -> Option<String> {
 }
 
 pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) -> Action {
+
     match name.to_lowercase().replace('_', " ").trim() {
         "eat"                         => Action::Eat,
         "cook"                        => Action::Cook,
@@ -381,5 +404,36 @@ pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) 
             tracing::warn!("Unknown action '{}', defaulting to Wander", other);
             Action::Wander
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_thinking_tags_removes_blocks() {
+        let s = "<think>some reasoning</think>actual content";
+        assert_eq!(strip_thinking_tags(s), "actual content");
+    }
+
+    #[test]
+    fn strip_thinking_tags_multiple_blocks() {
+        let s = "<think>a</think> middle <think>b</think> end";
+        let result = strip_thinking_tags(s);
+        assert!(!result.contains("<think>"), "think tags should be stripped: {}", result);
+        assert!(result.contains("middle"), "content should be preserved: {}", result);
+    }
+
+    #[test]
+    fn parse_response_with_think_tags() {
+        let raw = r#"<think>Let me choose an action carefully.</think>{"action":"eat","target":null,"intent":null,"reason":"hungry","description":"I sit down and eat."}"#;
+        let (action, reason, _desc) = parse_response(raw);
+        assert!(matches!(action, Action::Eat), "expected Eat, got {:?}", action);
+        assert_eq!(reason.as_deref(), Some("hungry"));
     }
 }

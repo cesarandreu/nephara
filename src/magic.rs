@@ -130,6 +130,8 @@ impl InterpretedIntent {
 // ---------------------------------------------------------------------------
 
 pub fn parse_interpreter_response(raw: &str) -> Option<InterpretedIntent> {
+    let stripped = crate::action::strip_thinking_tags(raw);
+    let raw = stripped.as_str();
     debug!(target: "magic", chars = raw.len(), raw = %raw, "Interpreter raw response");
 
     if let Ok(v) = serde_json::from_str::<InterpretedIntent>(raw.trim()) {

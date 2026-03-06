@@ -1,5 +1,6 @@
 mod action;
 mod agent;
+mod bench;
 mod color;
 mod config;
 mod llm;
@@ -19,9 +20,42 @@ use rand::{Rng, SeedableRng};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use llm::{LlmBackend, MockBackend, OllamaBackend};
+use llm::{ClaudeBackend, LlmBackend, MockBackend, OllamaBackend};
 use log::RunLog;
 use world::World;
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Bench subcommand types
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Benchmark one or more Ollama models across all prompt types.
+    Bench(BenchArgs),
+}
+
+#[derive(Parser, Debug)]
+struct BenchArgs {
+    /// Comma-separated list of Ollama model names to benchmark.
+    #[arg(long)]
+    models: String,
+
+    /// Number of samples per prompt type per model.
+    #[arg(long, default_value_t = 3)]
+    samples: usize,
+
+    /// Ollama base URL.
+    #[arg(long, default_value = "http://localhost:11434")]
+    ollama_url: String,
+
+    /// Write results to this JSON file (optional).
+    #[arg(long)]
+    output: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -69,6 +103,9 @@ struct Cli {
     /// Write full LLM prompts and responses to runs/{id}/llm_debug.md
     #[arg(long, default_value_t = false)]
     debug_llm: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +123,17 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // --- Bench subcommand (early exit, no config/souls needed) ---
+    if let Some(Commands::Bench(args)) = cli.command {
+        let models = args.models.split(',').map(|s| s.trim().to_string()).collect();
+        return bench::run_bench(bench::BenchConfig {
+            models,
+            samples:    args.samples,
+            ollama_url: args.ollama_url,
+            output:     args.output,
+        }).await;
+    }
+
     // --- Config ---
     let mut cfg = config::load(&cli.config)?;
     if let Some(url)   = &cli.llm_url { cfg.llm.ollama_url = url.clone(); }
@@ -106,6 +154,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             info!("Using MockBackend (no LLM required)");
             Arc::new(MockBackend::new(mock_rng))
         }
+        "claude" => {
+            let model = cli.model.as_deref()
+                .unwrap_or("claude-haiku-4-5-20251001")
+                .to_string();
+            info!("Using ClaudeBackend — model: {}", model);
+            Arc::new(ClaudeBackend::new(model).map_err(|e| { error!("{}", e); e })?)
+        }
         _ => {
             info!("Using OllamaBackend — model: {}, url: {}", cfg.llm.model, cfg.llm.ollama_url);
             let ollama = OllamaBackend::new(
@@ -123,7 +178,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Smart backend ---
     let smart_backend: Arc<dyn LlmBackend> = match cli.llm.as_str() {
-        "mock" => Arc::clone(&backend),
+        "mock" | "claude" => Arc::clone(&backend),
         _ => match &cfg.llm.smart_model.clone() {
             Some(model) => {
                 let smart = OllamaBackend::new(cfg.llm.ollama_url.clone(), model.clone(), cfg.llm.temperature);
