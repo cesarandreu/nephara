@@ -15,12 +15,13 @@ use crate::config::{ActionConfig, Config};
 pub fn build_action_schema(canonical_names: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["action", "reason"],
+        "required": ["action", "reason", "description"],
         "properties": {
-            "action":  { "type": "string", "enum": canonical_names },
-            "target":  { "type": ["string", "null"] },
-            "intent":  { "type": ["string", "null"] },
-            "reason":  { "type": "string" }
+            "action":      { "type": "string", "enum": canonical_names },
+            "target":      { "type": ["string", "null"] },
+            "intent":      { "type": ["string", "null"] },
+            "reason":      { "type": "string" },
+            "description": { "type": "string" }
         }
     })
 }
@@ -267,45 +268,47 @@ pub fn action_cfg_and_attr<'a>(action: &Action, config: &'a Config) -> (&'a Acti
 
 #[derive(Deserialize, Default)]
 struct ActionResponse {
-    action: Option<String>,
-    target: Option<String>,
-    intent: Option<String>,
-    reason: Option<String>,
+    action:      Option<String>,
+    target:      Option<String>,
+    intent:      Option<String>,
+    reason:      Option<String>,
+    description: Option<String>,
 }
 
 /// Cascading parser: JSON → code-fence extraction → regex → Wander default.
-/// Returns (action, reason) where reason is the LLM's stated reasoning if available.
-pub fn parse_response(raw: &str) -> (Action, Option<String>) {
+/// Returns (action, reason, description).
+pub fn parse_response(raw: &str) -> (Action, Option<String>, Option<String>) {
     // 1. Try direct JSON parse
-    if let Some((a, r)) = try_parse_json(raw) {
-        debug!(target: "action", action = ?a, "Action parsed from LLM output");
-        return (a, r);
+    if let Some(t) = try_parse_json(raw) {
+        debug!(target: "action", action = ?t.0, "Action parsed from LLM output");
+        return t;
     }
     // 2. Extract from ```json ... ``` code fence
     if let Some(json) = extract_code_fence(raw) {
-        if let Some((a, r)) = try_parse_json(&json) {
-            debug!(target: "action", action = ?a, "Action parsed from LLM output");
-            return (a, r);
+        if let Some(t) = try_parse_json(&json) {
+            debug!(target: "action", action = ?t.0, "Action parsed from LLM output");
+            return t;
         }
     }
     // 3. Extract action name with regex-like scan
     if let Some(action_name) = extract_action_field(raw) {
         let a = action_from_name(&action_name, None, None);
         debug!(target: "action", action = ?a, "Action parsed from LLM output");
-        return (a, None);
+        return (a, None, None);
     }
     // 4. Default
     tracing::warn!("Could not parse LLM response, defaulting to Wander. Raw: {}", &raw[..raw.len().min(200)]);
-    (Action::Wander, None)
+    (Action::Wander, None, None)
 }
 
-fn try_parse_json(s: &str) -> Option<(Action, Option<String>)> {
+fn try_parse_json(s: &str) -> Option<(Action, Option<String>, Option<String>)> {
     let s = s.trim();
     let parsed: ActionResponse = serde_json::from_str(s).ok()?;
-    let name = parsed.action?;
-    let action = action_from_name(&name, parsed.target.as_deref(), parsed.intent.as_deref());
-    let reason = parsed.reason.filter(|r| !r.is_empty());
-    Some((action, reason))
+    let name        = parsed.action?;
+    let action      = action_from_name(&name, parsed.target.as_deref(), parsed.intent.as_deref());
+    let reason      = parsed.reason.filter(|r| !r.is_empty());
+    let description = parsed.description.filter(|d| !d.is_empty());
+    Some((action, reason, description))
 }
 
 fn extract_code_fence(s: &str) -> Option<String> {

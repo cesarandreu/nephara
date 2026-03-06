@@ -172,16 +172,16 @@ impl MockBackend {
     }
 }
 
-// Vivid one-sentence outcomes for the GM Narrator
+// Vivid 2-3 sentence outcomes for the DM Narrator
 static MOCK_NARRATIVES: &[&str] = &[
-    "The effort shows in her hands — rough work, honest result.",
-    "He moves through it like someone who has done this a thousand times before.",
-    "Something shifts in the air around her, subtle but real.",
-    "It goes badly, and he knows it before it's finished.",
-    "She finds exactly what she was looking for, and it surprises her.",
-    "The moment passes without ceremony, leaving only the quiet satisfaction of having tried.",
-    "He stumbles once, catches himself, and carries on with quiet dignity.",
-    "A small triumph, the kind no one else will notice but her.",
+    "The effort shows in her hands — rough work, honest result. She doesn't stop to admire it; there is no need. Something settles in her that had been restless all morning.",
+    "He moves through it like someone who has done this a thousand times before. There is no hesitation, no wasted motion. When it's done, he doesn't look back.",
+    "Something shifts in the air around her, subtle but real. She pauses mid-motion, head tilted, as though listening to a sound no one else can hear. Then she continues, and the moment passes.",
+    "It goes badly, and he knows it before it's finished. He sets it aside without ceremony and stands very still for a moment. Then he starts again.",
+    "She finds exactly what she was looking for, and it surprises her. She holds it up to the light, turns it once, then tucks it away carefully. Some luck deserves to be kept quiet.",
+    "The moment passes without ceremony, leaving only the quiet satisfaction of having tried. Nothing dramatic — just the small, honest weight of a thing attempted. That is enough for now.",
+    "He stumbles once, catches himself, and carries on with quiet dignity. No one saw it, or if they did, they say nothing. By the time he reaches the end, he has already forgiven himself.",
+    "A small triumph, the kind no one else will notice but her. She allows herself one moment of stillness to mark it. Then the world resumes, indifferent and continuing.",
 ];
 
 // Valid InterpretedIntent JSON for mock Interpreter calls
@@ -252,7 +252,28 @@ impl LlmBackend for MockBackend {
     ) -> Result<String> {
         let mut rng = self.rng.lock().expect("mock rng poisoned");
 
-        // Detect prompt type by content — order matters
+        // Detect prompt type by content — order matters (most specific first)
+        if prompt.contains("This chapter of your life is ending") {
+            let choices = [
+                "I wish I had spent more time at the river — just sitting, not fishing, not thinking. I want the world to be quieter, slower. Less urgency and more willingness to simply be.",
+                "Looking back, I think I was too afraid to say what I wanted out loud. I'd want a world where speaking your desires didn't feel like a risk. More honesty, less pretending.",
+                "I regret not talking to the others more. I kept to myself when I didn't need to. Let the world be a little warmer — easier to approach and easier to be approached.",
+                "I wanted more magic. Not power — just strangeness, wonder, the sense that the ordinary could shift at any moment. I'd ask the world to stay surprising.",
+            ];
+            return Ok(choices[rng.gen_range(0..choices.len())].to_string());
+        }
+
+        if prompt.contains("Are there changes you would like to see in the world") {
+            let choices = [
+                "I keep thinking about the forest — how it holds its secrets so carefully. I want more time there, and maybe a little less noise from my own thoughts.",
+                "I want to understand magic better. Not just use it, but understand why it answers the way it does. The world could be more forthcoming about such things.",
+                "Today I found myself wishing for better company — not because anyone was unkind, but because I think I'm ready for it. I want the world to offer more chances to connect.",
+                "I want the river to run cleaner and the food to be more plentiful. Small wishes, but they weigh on me more than I'd like.",
+                "I've been thinking about what I'm here for. I don't have an answer yet, and I think I'd like the world to give me a little more time to find one.",
+            ];
+            return Ok(choices[rng.gen_range(0..choices.len())].to_string());
+        }
+
         if prompt.contains("intend to accomplish today") {
             let choices = [
                 "I intend to forage and rest by the river today.",

@@ -107,3 +107,6 @@ ollama_url             = "http://localhost:11434"
 interpreter_max_tokens = 300
 planning_max_tokens    = 60
 reflection_max_tokens  = 200
+# smart_model = "llama3:70b"   # optional: separate model for planning/reflection/desires
+narrator_max_tokens    = 120
+desires_max_tokens     = 100

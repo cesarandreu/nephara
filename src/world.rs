@@ -99,6 +99,7 @@ pub struct World {
     grid:               [[TileType; GRID_W]; GRID_H],
     rng:                StdRng,
     llm:                Arc<dyn LlmBackend>,
+    llm_smart:          Arc<dyn LlmBackend>,
     llm_call_counter:   u64,
 }
 
@@ -113,6 +114,7 @@ impl World {
         seed:      u64,
         rng:       StdRng,
         llm:       Arc<dyn LlmBackend>,
+        llm_smart: Arc<dyn LlmBackend>,
         run_log:   RunLog,
         souls_dir: String,
     ) -> Self {
@@ -133,6 +135,7 @@ impl World {
             grid,
             rng,
             llm,
+            llm_smart,
             llm_call_counter: 0,
         }
     }
@@ -157,11 +160,14 @@ impl World {
         let tod         = runlog::time_of_day(tick_in_day, self.config.time.night_start_tick);
 
         if tick_in_day == 0 {
-            // End-of-day reflection for the day that just ended
+            // End-of-day reflection and desires for the day that just ended
             if tick > 0 {
                 let prev_day = day - 1;
                 for idx in 0..self.agents.len() {
                     self.end_of_day_reflection(idx, prev_day).await?;
+                }
+                for idx in 0..self.agents.len() {
+                    self.end_of_day_desires(idx, prev_day).await?;
                 }
             }
             // Morning planning for the new day
@@ -224,12 +230,12 @@ impl World {
         }
 
         // --- Forced sleep if energy < forced_action threshold ---
-        let (action, reason) = if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action
+        let (action, reason, description) = if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action
             && self.is_at_own_home(idx)
         {
-            (Action::Sleep, None)
+            (Action::Sleep, None, None)
         } else if self.agents[idx].needs.energy < self.config.needs.thresholds.forced_action {
-            (Action::Move { destination: "home".to_string() }, None)
+            (Action::Move { destination: "home".to_string() }, None, None)
         } else {
             // Build schema from available canonical names
             let canonical = self.available_canonical_names(idx);
@@ -256,7 +262,7 @@ impl World {
         let action   = self.validate(idx, action);
         let tile     = self.tile_at(self.agents[idx].pos);
         let loc_name = self.tile_name(tile);
-        let mut entry = self.resolve_and_apply(idx, action, &loc_name, tick, day, tod, is_night).await?;
+        let mut entry = self.resolve_and_apply(idx, action, &loc_name, tick, day, tod, is_night, description).await?;
 
         if let Some(r) = reason.filter(|r| !r.is_empty()) {
             entry.outcome_line = format!("{}\n({})", entry.outcome_line, r);
@@ -342,13 +348,14 @@ impl World {
 
     async fn resolve_and_apply(
         &mut self,
-        idx:      usize,
-        action:   Action,
-        loc_name: &str,
-        tick:     u32,
-        day:      u32,
-        tod:      &str,
-        is_night: bool,
+        idx:         usize,
+        action:      Action,
+        loc_name:    &str,
+        tick:        u32,
+        day:         u32,
+        tod:         &str,
+        is_night:    bool,
+        description: Option<String>,
     ) -> Result<TickEntry, Box<dyn std::error::Error + Send + Sync>> {
         match action {
             // ---- Move ----
@@ -442,15 +449,17 @@ impl World {
                     .map(|a| a.name().to_string())
                     .collect();
                 let agent_name_str = self.agents[idx].name().to_string();
-                let gm_prompt = Self::build_gm_prompt(
+                let dm_prompt = Self::build_dm_prompt(
                     &agent_name_str, &res.action.display(), &res.tier, loc_name, &nearby,
+                    description.as_deref(),
                 );
                 let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
                 self.llm_call_counter += 1;
                 let llm = Arc::clone(&self.llm);
+                let narrator_max = self.config.llm.narrator_max_tokens;
                 debug!(target: "narrate", agent = %agent_name_str, action = %res.action.display(),
-                       tier = %res.tier.label(), "GM Narrator prompt sent");
-                let narrative = match llm.generate(&gm_prompt, 80, call_seed, None).await {
+                       tier = %res.tier.label(), "DM Narrator prompt sent");
+                let narrative = match llm.generate(&dm_prompt, narrator_max, call_seed, None).await {
                     Ok(n) if !n.trim().is_empty() => {
                         let n = n.trim().to_string();
                         debug!(target: "narrate", narrative = %n, "GM Narrator response");
@@ -809,7 +818,7 @@ Speak your desire and it will manifest — though words carry all their meanings
 Avoid repeating the same action twice in a row. Your personality should guide what you do.
 
 Choose ONE action. Respond with ONLY a JSON object:
-{{"action": "action_name", "target": "optional_target_name", "intent": "if casting, your spoken desire", "reason": "brief reason"}}"#,
+{{"action": "action_name", "target": "optional_target_name", "intent": "if casting, your spoken desire", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
             name             = agent.identity.name,
             personality      = agent.identity.personality,
             backstory        = agent.identity.backstory,
@@ -851,7 +860,7 @@ Choose ONE action. Respond with ONLY a JSON object:
         let prompt     = self.build_intentions_prompt(idx, day);
         let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
         self.llm_call_counter += 1;
-        let llm        = Arc::clone(&self.llm);
+        let llm        = Arc::clone(&self.llm_smart);
         let max_tokens = self.config.llm.planning_max_tokens;
         let response   = llm.generate(&prompt, max_tokens, call_seed, None).await
             .unwrap_or_else(|e| {
@@ -862,7 +871,10 @@ Choose ONE action. Respond with ONLY a JSON object:
         if !trimmed.is_empty() {
             debug!(target: "planning", agent = %self.agents[idx].name(), day = day,
                    intention = %trimmed, "Morning intention set");
-            self.agents[idx].daily_intentions = Some(trimmed);
+            self.agents[idx].daily_intentions = Some(trimmed.clone());
+            let name   = self.agents[idx].name().to_string();
+            let run_id = self.run_log.run_id.clone();
+            runlog::log_introspection(&run_id, &name, day, "Morning Planning", &trimmed);
         }
         Ok(())
     }
@@ -875,7 +887,7 @@ Choose ONE action. Respond with ONLY a JSON object:
         let prompt     = self.build_reflection_prompt(idx, day);
         let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
         self.llm_call_counter += 1;
-        let llm        = Arc::clone(&self.llm);
+        let llm        = Arc::clone(&self.llm_smart);
         let max_tokens = self.config.llm.reflection_max_tokens;
         let response   = llm.generate(&prompt, max_tokens, call_seed, None).await
             .unwrap_or_else(|e| {
@@ -891,6 +903,59 @@ Choose ONE action. Respond with ONLY a JSON object:
             self.agents[idx].life_story = trimmed.clone();
             runlog::save_story(&souls_dir, &name, &trimmed);
             runlog::append_day_journal(&souls_dir, &name, &run_id, day, &trimmed);
+            runlog::log_introspection(&run_id, &name, day, "End-of-Day Reflection", &trimmed);
+        }
+        Ok(())
+    }
+
+    async fn end_of_day_desires(
+        &mut self,
+        idx: usize,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let prompt     = self.build_desires_prompt(idx, day);
+        let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm        = Arc::clone(&self.llm_smart);
+        let max_tokens = self.config.llm.desires_max_tokens;
+        let response   = llm.generate(&prompt, max_tokens, call_seed, None).await
+            .unwrap_or_else(|e| {
+                warn!("Desires LLM error for {}: {}", self.agents[idx].name(), e);
+                String::new()
+            });
+        let trimmed = response.trim().to_string();
+        if !trimmed.is_empty() {
+            let name      = self.agents[idx].name().to_string();
+            let souls_dir = self.souls_dir.clone();
+            let run_id    = self.run_log.run_id.clone();
+            self.agents[idx].desires = Some(trimmed.clone());
+            runlog::append_wishes(&souls_dir, &name, &format!("## Day {}", day), &trimmed);
+            runlog::log_introspection(&run_id, &name, day, "End-of-Day Desires", &trimmed);
+        }
+        Ok(())
+    }
+
+    pub async fn end_of_run_desires(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for idx in 0..self.agents.len() {
+            let prompt     = self.build_end_of_run_desires_prompt(idx);
+            let call_seed  = Some(self.seed.wrapping_add(self.llm_call_counter));
+            self.llm_call_counter += 1;
+            let llm        = Arc::clone(&self.llm_smart);
+            let max_tokens = self.config.llm.desires_max_tokens;
+            let response   = llm.generate(&prompt, max_tokens, call_seed, None).await
+                .unwrap_or_else(|e| {
+                    warn!("End-of-run desires LLM error for {}: {}", self.agents[idx].name(), e);
+                    String::new()
+                });
+            let trimmed = response.trim().to_string();
+            if !trimmed.is_empty() {
+                let name      = self.agents[idx].name().to_string();
+                let souls_dir = self.souls_dir.clone();
+                let run_id    = self.run_log.run_id.clone();
+                let day       = self.tick_num / self.config.time.ticks_per_day + 1;
+                runlog::append_wishes(&souls_dir, &name, &format!("## Run {} End", run_id), &trimmed);
+                runlog::log_introspection(&run_id, &name, day, "End-of-Run Desires", &trimmed);
+            }
         }
         Ok(())
     }
@@ -935,28 +1000,70 @@ Choose ONE action. Respond with ONLY a JSON object:
         )
     }
 
-    fn build_gm_prompt(
+    fn build_desires_prompt(&self, idx: usize, day: u32) -> String {
+        let agent = &self.agents[idx];
+        let story = if agent.life_story.is_empty() {
+            "(your story is still unfolding — this is your first day)".to_string()
+        } else {
+            agent.life_story.clone()
+        };
+        format!(
+            "You are {name}. {personality}\n\nYour life so far:\n{story}\n\nDay {day} has ended. The village is quiet.\n\nWhat are you thinking about? What do you want?\nAre there changes you would like to see in the world?\nAnswer in 2-3 sentences, in your own voice.",
+            name        = agent.identity.name,
+            personality = agent.identity.personality,
+            story       = story,
+            day         = day,
+        )
+    }
+
+    fn build_end_of_run_desires_prompt(&self, idx: usize) -> String {
+        let agent = &self.agents[idx];
+        let story = if agent.life_story.is_empty() {
+            "(your story is still unfolding)".to_string()
+        } else {
+            agent.life_story.clone()
+        };
+        let desires_block = match &agent.desires {
+            Some(d) => format!("\nYour most recent thoughts: {}", d),
+            None    => String::new(),
+        };
+        format!(
+            "You are {name}. {personality}\n\nYour life so far:\n{story}{desires_block}\n\nThis chapter of your life is ending. The simulation is complete.\n\nLooking back — what do you wish had been different? What would you want the world to be?\nAnswer in 2-3 sentences, in your own voice.",
+            name          = agent.identity.name,
+            personality   = agent.identity.personality,
+            story         = story,
+            desires_block = desires_block,
+        )
+    }
+
+    fn build_dm_prompt(
         agent_name:     &str,
         action_display: &str,
         tier:           &OutcomeTier,
         loc_name:       &str,
         nearby:         &[String],
+        description:    Option<&str>,
     ) -> String {
         let context = if nearby.is_empty() {
             "Alone.".to_string()
         } else {
             format!("{} watched.", nearby.join(", "))
         };
+        let agent_voice = match description {
+            Some(d) if !d.is_empty() => format!("\nIn {}'s own words: \"{}\"", agent_name, d),
+            _ => String::new(),
+        };
         format!(
             "You are the Narrator of Nephara.\n\
              {agent_name} attempted to {action_display} at {loc_name}.\n\
-             {context}\n\
+             {context}{agent_voice}\n\
              Outcome: {tier}.\n\n\
-             Write ONE vivid sentence (15-25 words). Pure story — no numbers, no dice.",
+             Write 2-3 vivid sentences. Pure story — no numbers, no dice.",
             agent_name     = agent_name,
             action_display = action_display,
             loc_name       = loc_name,
             context        = context,
+            agent_voice    = agent_voice,
             tier           = tier.label(),
         )
     }

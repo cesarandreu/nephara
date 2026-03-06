@@ -194,6 +194,7 @@ pub struct Agent {
     pub sleep_energy_tick: Option<f32>,
     pub daily_intentions:  Option<String>,
     pub life_story:        String,
+    pub desires:           Option<String>,
 }
 
 impl Agent {
@@ -222,6 +223,7 @@ impl Agent {
             sleep_energy_tick: None,
             daily_intentions:  None,
             life_story:        String::new(),
+            desires:           None,
         }
     }
 

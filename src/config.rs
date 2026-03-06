@@ -101,6 +101,9 @@ pub struct LlmConfig {
     pub interpreter_max_tokens: u32,
     pub planning_max_tokens:    u32,
     pub reflection_max_tokens:  u32,
+    pub smart_model:            Option<String>,
+    pub narrator_max_tokens:    u32,
+    pub desires_max_tokens:     u32,
 }
 
 pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {

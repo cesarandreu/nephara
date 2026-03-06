@@ -12,7 +12,7 @@ use std::sync::Arc;
 use clap::Parser;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use llm::{LlmBackend, MockBackend, OllamaBackend};
@@ -126,6 +126,27 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    // --- Smart backend (for planning/reflection/desires) ---
+    let smart_backend: Arc<dyn LlmBackend> = match cli.llm.as_str() {
+        "mock" => Arc::clone(&backend),
+        _ => match &cfg.llm.smart_model.clone() {
+            Some(model) => {
+                let smart = OllamaBackend::new(cfg.llm.ollama_url.clone(), model.clone(), cfg.llm.temperature);
+                match smart.health_check().await {
+                    Ok(_)  => {
+                        info!("Smart model '{}' available for planning/reflection/desires", model);
+                        Arc::new(smart) as Arc<dyn LlmBackend>
+                    }
+                    Err(e) => {
+                        warn!("Smart model '{}' unavailable: {}. Falling back to main model.", model, e);
+                        Arc::clone(&backend)
+                    }
+                }
+            }
+            None => Arc::clone(&backend),
+        }
+    };
+
     // --- Soul seeds ---
     let souls = soul::load_all(&cli.souls)?;
     info!("Loaded {} soul seeds: {}", souls.len(), souls.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
@@ -135,7 +156,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Run output: runs/{}/", run_log.run_id);
 
     // --- World ---
-    let mut world = World::new(souls, cfg.clone(), seed, rng, backend, run_log, cli.souls.clone());
+    let mut world = World::new(souls, cfg.clone(), seed, rng, backend, smart_backend, run_log, cli.souls.clone());
     world.load_stories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
@@ -178,6 +199,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Final state dump ---
     log::write_state_dump(&world.run_log.run_id, total_ticks, &world.agents, seed);
+
+    // --- End-of-run desires ---
+    if let Err(e) = world.end_of_run_desires().await {
+        warn!("End-of-run desires failed: {}", e);
+    }
 
     // --- Journal + summary ---
     let notable_by_agent: Vec<Vec<String>> = world.agents.iter().map(|a| {

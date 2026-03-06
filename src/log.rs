@@ -163,6 +163,34 @@ pub fn write_state_dump(
 }
 
 // ---------------------------------------------------------------------------
+// Introspection log
+// ---------------------------------------------------------------------------
+
+pub fn log_introspection(run_id: &str, agent_name: &str, day: u32, call_type: &str, content: &str) {
+    let path  = format!("runs/{}/introspection.md", run_id);
+    let entry = format!("\n### {} — Day {} {}\n{}\n", agent_name, day, call_type, content);
+    let file  = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not write introspection for {}: {}", agent_name, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wishes file
+// ---------------------------------------------------------------------------
+
+pub fn append_wishes(souls_dir: &str, agent_name: &str, header: &str, content: &str) {
+    let path  = format!("{}/{}.wishes.md", souls_dir, agent_name.to_lowercase());
+    let entry = format!("\n{}\n{}\n", header, content);
+    let file  = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not append wishes for {}: {}", agent_name, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Story persistence
 // ---------------------------------------------------------------------------
 
