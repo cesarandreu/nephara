@@ -11,11 +11,24 @@ pub struct Config {
     pub simulation: SimulationConfig,
     pub llm:        LlmConfig,
     pub world:      WorldConfig,
+    pub events:     EventsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorldConfig {
     pub resource_respawn_ticks: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventsConfig {
+    /// Per-tick probability of a Storm starting (when no event is active).
+    pub storm_prob:    f32,
+    /// Per-tick probability of a Festival starting (when no event is active).
+    pub festival_prob: f32,
+    /// Per-tick probability of a ResourceWindfall occurring (independent of active event).
+    pub windfall_prob: f32,
+    /// Per-tick probability of a MagicResidue appearing (when no event is active).
+    pub residue_prob:  f32,
 }
 
 #[derive(Debug, Deserialize, Clone)]

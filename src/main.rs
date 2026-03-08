@@ -393,6 +393,16 @@ async fn run_streaming(
                 &notable_by_agent[i],
             );
         }
+        // FEAT-21: persist attribute growth; FEAT-18: persist relationships
+        for agent in &world.agents {
+            log::save_growth(
+                souls_dir, agent.name(), &world.run_log.run_id,
+                &agent.attributes, &agent.attribute_xp,
+            );
+            log::save_relationships(
+                souls_dir, agent.name(), &world.run_log.run_id, &agent.affinity,
+            );
+        }
     }
 
     let all_notable: Vec<String> = world.notable_events.iter().map(|(_, e)| e.clone()).collect();

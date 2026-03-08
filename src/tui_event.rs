@@ -11,6 +11,8 @@ pub enum DayEventKind {
     MorningIntention,
     EveningReflection,
     EveningDesire,
+    /// A world event (storm, festival, windfall, magic residue) — FEAT-19.
+    WorldEvent,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,11 @@ pub enum TuiEvent {
         agent_name: String,
         day:        u32,
         text:       String,
+    },
+    /// A world event (storm, festival, etc.) — FEAT-19.
+    WorldEvent {
+        day:  u32,
+        text: String,
     },
     SimulationComplete {
         total_ticks:    u32,

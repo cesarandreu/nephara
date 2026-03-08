@@ -46,6 +46,11 @@ pub enum LogEntry {
         day:        u32,
         text:       String,
     },
+    /// A world event notification (FEAT-19).
+    WorldEvent {
+        day:  u32,
+        text: String,
+    },
     SimComplete {
         total_ticks:    u32,
         magic_count:    u32,
@@ -204,6 +209,10 @@ impl TuiApp {
                 });
                 if !self.scroll_locked { self.scroll_to_bottom(); }
             }
+            TuiEvent::WorldEvent { day, text } => {
+                self.log_entries.push(LogEntry::WorldEvent { day, text });
+                if !self.scroll_locked { self.scroll_to_bottom(); }
+            }
             TuiEvent::SimulationComplete { total_ticks, magic_count, notable_events } => {
                 self.log_entries.push(LogEntry::SimComplete {
                     total_ticks, magic_count, notable: notable_events,
@@ -261,6 +270,9 @@ impl TuiApp {
                     if wrapped.len() > 3 { count += 1; } // "[+N more]" line
                 }
                 count
+            }
+            LogEntry::WorldEvent { text, .. } => {
+                1 + wrap_text(text, wrap_width.saturating_sub(4)).len().min(3)
             }
             LogEntry::SimComplete { notable, .. } => {
                 4 + if notable.is_empty() { 0 } else { 1 + notable.len() }
@@ -740,6 +752,21 @@ impl TuiApp {
                         out.push(Line::from(Span::styled(
                             format!("  [+{} more — Space to expand]", wrapped.len() - 3),
                             Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+
+                LogEntry::WorldEvent { day, text } => {
+                    let bg = if is_selected { Style::default().bg(Color::DarkGray) } else { Style::default() };
+                    out.push(Line::from(vec![
+                        Span::styled("⚡ ", Style::default().fg(Color::LightYellow)),
+                        Span::styled(format!("Day {} — World Event: ", day), Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                    ]).patch_style(bg));
+                    let wrapped = wrap_text(text, wrap_width.saturating_sub(4));
+                    for line in wrapped.iter().take(3) {
+                        out.push(Line::from(Span::styled(
+                            format!("  {}", line),
+                            Style::default().fg(Color::Yellow),
                         )));
                     }
                 }

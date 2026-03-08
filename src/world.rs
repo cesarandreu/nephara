@@ -2,6 +2,7 @@ use chrono::Local as ChronoLocal;
 use colored::Colorize;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -201,6 +202,27 @@ fn agent_visible_state(a: &Agent, config: &Config) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// World events (FEAT-19)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorldEventKind {
+    /// All skill-check DCs raised by 4. Duration 3–6 ticks.
+    Storm,
+    /// Agents at Square or Tavern gain +2 fun/social per tick. Duration 4–8 ticks.
+    Festival,
+    /// Flavor: magic residue lingers in the air. Duration 1–3 ticks.
+    MagicResidue,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveWorldEvent {
+    pub kind:       WorldEventKind,
+    pub ticks_left: u32,
+    pub description: String,
+}
+
+// ---------------------------------------------------------------------------
 // Tick result (returned from World::tick)
 // ---------------------------------------------------------------------------
 
@@ -232,6 +254,8 @@ pub struct World {
     pub resource_nodes:      Vec<ResourceNode>,
     pub is_test_run:         bool,
     pub pending_day_events:  Vec<DayEvent>,
+    /// Currently active world event, if any (FEAT-19).
+    pub active_event:        Option<ActiveWorldEvent>,
     /// When true (--no-tui mode), stream LLM action tokens to stdout.
     pub token_echo:          bool,
     /// When Some (TUI mode), send PartialToken events to the TUI.
@@ -287,6 +311,7 @@ impl World {
             resource_nodes,
             is_test_run,
             pending_day_events: Vec::new(),
+            active_event: None,
             token_echo: false,
             tui_tx: None,
             grid,
@@ -310,6 +335,21 @@ impl World {
             agent.journal_summary = runlog::load_journal_excerpt(
                 &self.souls_dir, &agent.identity.name, self.config.memory.journal_n_runs,
             );
+            // FEAT-21: load grown attribute scores and XP
+            let growth = runlog::load_growth(&self.souls_dir, &agent.identity.name);
+            for (attr, score) in &growth.scores {
+                match attr.as_str() {
+                    "vigor" => { if *score <= 10 { agent.attributes.vigor = *score; } }
+                    "wit"   => { if *score <= 10 { agent.attributes.wit   = *score; } }
+                    "grace" => { if *score <= 10 { agent.attributes.grace = *score; } }
+                    "heart" => { if *score <= 10 { agent.attributes.heart = *score; } }
+                    "numen" => { if *score <= 10 { agent.attributes.numen = *score; } }
+                    _ => {}
+                }
+            }
+            agent.attribute_xp = growth.xp;
+            // FEAT-18: load affinity / relationships
+            agent.affinity = runlog::load_relationships(&self.souls_dir, &agent.identity.name);
         }
     }
 
@@ -342,6 +382,107 @@ impl World {
         }
         if loaded > 0 {
             tracing::info!("Loaded journal memories for {} agents", loaded);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // World events (FEAT-19)
+    // -----------------------------------------------------------------------
+
+    /// Extra DC added to all skill checks during a Storm.
+    pub fn storm_dc_bonus(&self) -> u32 {
+        if matches!(self.active_event.as_ref().map(|e| &e.kind), Some(WorldEventKind::Storm)) { 4 } else { 0 }
+    }
+
+    /// Roll for new world events and apply ongoing event effects.
+    /// Called once at the start of each tick.
+    fn process_world_events(&mut self, tick: u32, day: u32, tod: &str) {
+        // Decrement active event
+        if let Some(ref mut ev) = self.active_event {
+            if ev.ticks_left > 0 {
+                ev.ticks_left -= 1;
+                // Festival: bonus to agents at Square/Tavern
+                if ev.kind == WorldEventKind::Festival {
+                    for agent in &mut self.agents {
+                        let tile = self.grid[agent.pos.1 as usize][agent.pos.0 as usize];
+                        if matches!(tile, TileType::Square | TileType::Tavern) {
+                            agent.needs.fun    = (agent.needs.fun    + 2.0).min(100.0);
+                            agent.needs.social = (agent.needs.social + 2.0).min(100.0);
+                        }
+                    }
+                }
+            }
+        }
+        if self.active_event.as_ref().map(|e| e.ticks_left == 0).unwrap_or(false) {
+            if let Some(ref ev) = self.active_event {
+                let ended = format!("Day {day}: The {} ended.", ev.description);
+                tracing::info!("{}", ended);
+            }
+            self.active_event = None;
+        }
+
+        let cfg = self.config.events.clone();
+
+        // ResourceWindfall: independent of active event
+        if self.rng.gen::<f32>() < cfg.windfall_prob {
+            // Find a depleted resource node
+            let depleted_idx = self.resource_nodes.iter().position(|n| n.charges == 0);
+            if let Some(ni) = depleted_idx {
+                let double = self.resource_nodes[ni].max_charges * 2;
+                self.resource_nodes[ni].charges       = double;
+                self.resource_nodes[ni].max_charges   = double;
+                let kind_name = format!("{:?}", self.resource_nodes[ni].kind);
+                let desc = format!("Day {day} | {tod} | A windfall: the {} has become remarkably abundant.", kind_name);
+                tracing::info!("{}", desc);
+                self.notable_events.push((0, format!("Day {day}: ResourceWindfall — {kind_name} doubled")));
+                self.pending_day_events.push(DayEvent {
+                    kind:       DayEventKind::WorldEvent,
+                    agent_id:   0,
+                    agent_name: "World".to_string(),
+                    day,
+                    text:       format!("A windfall of abundance! The {} overflows with bounty.", kind_name),
+                });
+            }
+        }
+
+        // Start new event only if none active
+        if self.active_event.is_none() {
+            if self.rng.gen::<f32>() < cfg.storm_prob {
+                let ticks = self.rng.gen_range(3u32..=6);
+                let desc  = "A sudden storm sweeps through Nephara. All skill checks are harder.".to_string();
+                tracing::info!("Tick {tick}: {}", desc);
+                self.pending_day_events.push(DayEvent {
+                    kind:       DayEventKind::WorldEvent,
+                    agent_id:   0,
+                    agent_name: "World".to_string(),
+                    day,
+                    text:       desc.clone(),
+                });
+                self.active_event = Some(ActiveWorldEvent { kind: WorldEventKind::Storm, ticks_left: ticks, description: "storm".to_string() });
+            } else if self.rng.gen::<f32>() < cfg.festival_prob {
+                let ticks = self.rng.gen_range(4u32..=8);
+                let desc  = "A spontaneous festival breaks out in the village! Laughter fills the Square and Tavern.".to_string();
+                tracing::info!("Tick {tick}: {}", desc);
+                self.pending_day_events.push(DayEvent {
+                    kind:       DayEventKind::WorldEvent,
+                    agent_id:   0,
+                    agent_name: "World".to_string(),
+                    day,
+                    text:       desc.clone(),
+                });
+                self.active_event = Some(ActiveWorldEvent { kind: WorldEventKind::Festival, ticks_left: ticks, description: "festival".to_string() });
+            } else if self.rng.gen::<f32>() < cfg.residue_prob {
+                let ticks = self.rng.gen_range(1u32..=3);
+                let desc  = "Magic residue from a recent casting shimmers faintly in the air.".to_string();
+                self.active_event = Some(ActiveWorldEvent { kind: WorldEventKind::MagicResidue, ticks_left: ticks, description: "magic residue".to_string() });
+                self.pending_day_events.push(DayEvent {
+                    kind:       DayEventKind::WorldEvent,
+                    agent_id:   0,
+                    agent_name: "World".to_string(),
+                    day,
+                    text:       desc.clone(),
+                });
+            }
         }
     }
 
@@ -401,6 +542,9 @@ impl World {
             }
             for flag in &mut self.magic_cast_this_day { *flag = false; }
         }
+
+        // FEAT-19: roll for and apply world events
+        self.process_world_events(tick, day, tod);
 
         let mut order: Vec<usize> = (0..self.agents.len()).collect();
         order.shuffle(&mut self.rng);
@@ -709,11 +853,17 @@ impl World {
 
             // ---- Standard d20 resolution ----
             action => {
+                // FEAT-21: neglect debuff; FEAT-19: storm DC bonus
+                let attr_name = action::action_attribute(&action);
+                let neglect_dc = self.agents[idx].neglect_extra_dc(attr_name, tick);
+                let storm_dc   = self.storm_dc_bonus();
+                let extra_dc   = neglect_dc + storm_dc;
+
                 let res = {
                     let attrs  = &self.agents[idx].attributes;
                     let needs  = &self.agents[idx].needs;
                     let config = &self.config;
-                    action::resolve(&action, attrs, needs, config, is_night, &mut self.rng)
+                    action::resolve(&action, attrs, needs, config, is_night, extra_dc, &mut self.rng)
                 };
 
                 if res.duration > 1 {
@@ -778,6 +928,17 @@ impl World {
                     let ev = format!("Day {day}: {} got a critical success on {}",
                         self.agents[idx].name(), res.action.name());
                     self.notable_events.push((idx, ev));
+                    // FEAT-21: grant XP for the governing attribute
+                    if let Some(new_score) = self.agents[idx].grant_xp(res.attribute) {
+                        let level_ev = format!("Day {day}: {} leveled up {} to {}!",
+                            self.agents[idx].name(), res.attribute, new_score);
+                        self.notable_events.push((idx, level_ev.clone()));
+                        tracing::info!("{}", level_ev);
+                    }
+                }
+                // FEAT-21: record successful use to reset neglect debuff
+                if matches!(res.tier, OutcomeTier::Success | OutcomeTier::CriticalSuccess) {
+                    self.agents[idx].record_success(res.attribute, tick);
                 }
                 if res.tier == OutcomeTier::CriticalFail {
                     let ev = format!("Day {day}: {} critically failed at {}",
@@ -889,15 +1050,43 @@ impl World {
             &chat_prompt, &raw_chat);
         let (summary, exchange) = Self::parse_chat_response(&raw_chat);
 
+        // FEAT-21: neglect + storm extra DC for Heart
+        let neglect_dc = self.agents[idx].neglect_extra_dc("heart", tick);
+        let storm_dc   = self.storm_dc_bonus();
+        let extra_dc   = neglect_dc + storm_dc;
+
         let res = {
             let agent = &self.agents[idx];
             action::resolve(
                 &Action::Chat { target_name: target.to_string() },
-                &agent.attributes, &agent.needs, &self.config, is_night, &mut self.rng,
+                &agent.attributes, &agent.needs, &self.config, is_night, extra_dc, &mut self.rng,
             )
         };
 
-        let changes  = res.need_changes.clone();
+        // FEAT-21: record success for Heart
+        if matches!(res.tier, OutcomeTier::Success | OutcomeTier::CriticalSuccess) {
+            self.agents[idx].record_success("heart", tick);
+        }
+
+        // FEAT-18: affinity-based social restore bonus/penalty
+        let affinity_bonus = self.agents[idx].affinity_social_bonus(self.agents[target_idx].name());
+        let mut changes  = res.need_changes.clone();
+        if let Some(ref mut s) = changes.social {
+            *s = (*s + affinity_bonus).max(0.0);
+        }
+
+        // FEAT-18: update affinity based on outcome
+        let (delta_a, delta_b): (f32, f32) = match res.tier {
+            OutcomeTier::CriticalSuccess => (10.0, 10.0),
+            OutcomeTier::Success         => ( 5.0,  5.0),
+            OutcomeTier::Fail            => (-2.0, -2.0),
+            OutcomeTier::CriticalFail    => (-5.0, -5.0),
+        };
+        let target_name_own    = self.agents[target_idx].name().to_string();
+        let initiator_name_own = self.agents[idx].name().to_string();
+        self.agents[idx].update_affinity(&target_name_own, delta_a);
+        self.agents[target_idx].update_affinity(&initiator_name_own, delta_b);
+
         let buf      = self.config.memory.buffer_size;
         let mem_a    = format!("Tick {tick} | Day {day} | {tod} | Chat with {} — \"{}\". [{}]",
             self.agents[target_idx].name(), &summary[..summary.len().min(80)], changes.describe());
@@ -978,6 +1167,7 @@ impl World {
 
         let ambient_fun    = (need_changes.fun.unwrap_or(0.0) * 0.5).min(8.0).max(0.0);
         let ambient_social = 4.0_f32;
+        let caster_name_str = self.agents[idx].name().to_string();
         let ambient_touched = if ambient_fun > 0.0 || ambient_social > 0.0 {
             let caster_pos = self.agents[idx].pos;
             let caster_id  = self.agents[idx].id;
@@ -989,6 +1179,8 @@ impl World {
             for nid in nearby_ids {
                 self.agents[nid].needs.fun    = (self.agents[nid].needs.fun    + ambient_fun).min(100.0);
                 self.agents[nid].needs.social = (self.agents[nid].needs.social + ambient_social).min(100.0);
+                // FEAT-18: witnessing a magic cast raises affinity toward caster
+                self.agents[nid].update_affinity(&caster_name_str, 3.0);
             }
             touched
         } else {
@@ -1448,6 +1640,37 @@ impl World {
             String::new()
         };
 
+        // FEAT-18: affinity notes for nearby agents
+        let affinity_notes: Vec<String> = self.agents.iter()
+            .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1)
+            .filter_map(|a| {
+                let v = agent.affinity.get(a.name()).copied().unwrap_or(0.0);
+                if v > 20.0 {
+                    Some(format!("  You feel warmly toward {}.", a.name()))
+                } else if v < -20.0 {
+                    Some(format!("  You feel wary of {}.", a.name()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let affinity_block = if affinity_notes.is_empty() {
+            String::new()
+        } else {
+            format!("\nBONDS:\n{}\n", affinity_notes.join("\n"))
+        };
+
+        // FEAT-19: world event note for prompt
+        let event_note = match self.active_event.as_ref() {
+            Some(ev) if ev.kind == WorldEventKind::Storm =>
+                "\n[A storm is raging — all skill checks are harder today.]\n".to_string(),
+            Some(ev) if ev.kind == WorldEventKind::Festival =>
+                "\n[A festival is underway in the village — there is music and laughter in the Square.]\n".to_string(),
+            Some(ev) if ev.kind == WorldEventKind::MagicResidue =>
+                "\n[You sense lingering magic in the air from a recent casting.]\n".to_string(),
+            _ => String::new(),
+        };
+
         let remembered_past = if !agent.journal_summary.is_empty() {
             format!("REMEMBERED PAST:\n{}\n\n", agent.journal_summary)
         } else {
@@ -1475,8 +1698,7 @@ CURRENT STATE:
 - Hygiene:  {hygiene:.0}/100  (100=clean, 0=filthy)
 {warnings}
 
-NEARBY: {nearby}
-
+NEARBY: {nearby}{affinity_block}{event_note}
 VIEWPORT (you are [X]):
 {viewport}
 (legend: F=Forest ~=River S=Square V=Tavern W=Well M=Meadow h=Home P=Temple X=you)
@@ -1515,6 +1737,8 @@ Choose ONE action. Respond with ONLY a JSON object:
             hygiene          = agent.needs.hygiene,
             warnings         = warnings_str,
             nearby           = nearby_str,
+            affinity_block   = affinity_block,
+            event_note       = event_note,
             viewport         = viewport,
             region_note      = region_note,
             memory           = memory_block,

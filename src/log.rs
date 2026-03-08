@@ -384,6 +384,111 @@ pub fn archive_oracle_response(souls_dir: &str, agent_name: &str, run_id: &str, 
 }
 
 // ---------------------------------------------------------------------------
+// Attribute growth persistence (FEAT-21)
+// ---------------------------------------------------------------------------
+
+/// Saved attribute scores + XP. Applies on top of soul seed values.
+pub struct GrowthData {
+    pub scores: std::collections::HashMap<String, u32>,
+    pub xp:     std::collections::HashMap<String, u32>,
+}
+
+/// Load grown attribute scores and XP from `souls/{name}.growth.md`.
+/// Returns empty maps if the file is missing or unparseable.
+pub fn load_growth(souls_dir: &str, name: &str) -> GrowthData {
+    let path    = format!("{}/{}.growth.md", souls_dir, name.to_lowercase());
+    let content = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return GrowthData { scores: Default::default(), xp: Default::default() } };
+    let mut scores = std::collections::HashMap::new();
+    let mut xp     = std::collections::HashMap::new();
+    for line in content.lines() {
+        // Format: "- vigor: 7 xp: 2"
+        let line = line.trim().trim_start_matches('-').trim();
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 && parts[2] == "xp:" {
+            // "vigor:" "7" "xp:" "2"  → strip trailing ':'
+            if let (Some(attr), Ok(score), Ok(x)) = (
+                parts[0].strip_suffix(':'),
+                parts[1].parse::<u32>(),
+                parts[3].parse::<u32>(),
+            ) {
+                scores.insert(attr.to_string(), score);
+                xp.insert(attr.to_string(), x);
+            }
+        }
+    }
+    GrowthData { scores, xp }
+}
+
+/// Overwrite `souls/{name}.growth.md` with the agent's current attribute scores and XP.
+pub fn save_growth(
+    souls_dir: &str,
+    name:      &str,
+    run_id:    &str,
+    attrs:     &crate::agent::Attributes,
+    xp:        &std::collections::HashMap<String, u32>,
+) {
+    let path = format!("{}/{}.growth.md", souls_dir, name.to_lowercase());
+    let date = Local::now().format("%Y-%m-%d");
+    let body = format!(
+        "# Attribute Growth — {}\nLast updated: Run {} — {}\n\n- vigor: {} xp: {}\n- wit: {} xp: {}\n- grace: {} xp: {}\n- heart: {} xp: {}\n- numen: {} xp: {}\n",
+        name, run_id, date,
+        attrs.vigor, xp.get("vigor").copied().unwrap_or(0),
+        attrs.wit,   xp.get("wit")  .copied().unwrap_or(0),
+        attrs.grace, xp.get("grace").copied().unwrap_or(0),
+        attrs.heart, xp.get("heart").copied().unwrap_or(0),
+        attrs.numen, xp.get("numen").copied().unwrap_or(0),
+    );
+    if let Err(e) = fs::write(&path, body) {
+        warn!("Could not save growth for {}: {}", name, e);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relationship persistence (FEAT-18)
+// ---------------------------------------------------------------------------
+
+/// Append current affinity values to `souls/{name}.relationships.md`.
+pub fn save_relationships(
+    souls_dir: &str,
+    name:      &str,
+    run_id:    &str,
+    affinity:  &std::collections::HashMap<String, f32>,
+) {
+    if affinity.is_empty() { return; }
+    let path  = format!("{}/{}.relationships.md", souls_dir, name.to_lowercase());
+    let date  = Local::now().format("%Y-%m-%d");
+    let mut entry = format!("\n## Run {} — {}\n", run_id, date);
+    let mut pairs: Vec<_> = affinity.iter().collect();
+    pairs.sort_by_key(|(k, _)| k.as_str());
+    for (other, v) in pairs {
+        entry.push_str(&format!("- {}: {:.1}\n", other, v));
+    }
+    let file = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not save relationships for {}: {}", name, e),
+    }
+}
+
+/// Load the most recent affinity values for each named agent from
+/// `souls/{name}.relationships.md`.
+pub fn load_relationships(souls_dir: &str, name: &str) -> std::collections::HashMap<String, f32> {
+    let path    = format!("{}/{}.relationships.md", souls_dir, name.to_lowercase());
+    let content = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return Default::default() };
+    let mut map: std::collections::HashMap<String, f32> = Default::default();
+    for line in content.lines() {
+        // Format: "- Rowan: 15.0"
+        let line = line.trim().trim_start_matches('-').trim();
+        if let Some((k, v)) = line.split_once(':') {
+            if let Ok(val) = v.trim().parse::<f32>() {
+                map.insert(k.trim().to_string(), val);
+            }
+        }
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
 // Journal excerpt loader (FEAT-20)
 // ---------------------------------------------------------------------------
 

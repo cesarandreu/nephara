@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, NeedsValues};
@@ -205,6 +205,12 @@ pub struct Agent {
     pub oracle_pending:    bool,
     /// Summary (or raw excerpt) of past journal entries, injected into prompts.
     pub journal_summary:   String,
+    /// XP toward leveling up each attribute (key: lowercase attr name).
+    pub attribute_xp:           HashMap<String, u32>,
+    /// Tick of the most recent successful use per attribute (for neglect debuff).
+    pub attribute_last_success: HashMap<String, u32>,
+    /// Affinity toward other agents keyed by name, range -100..=100.
+    pub affinity:               HashMap<String, f32>,
 }
 
 impl Agent {
@@ -236,6 +242,9 @@ impl Agent {
             desires:           None,
             oracle_pending:    false,
             journal_summary:   String::new(),
+            attribute_xp:           HashMap::new(),
+            attribute_last_success: HashMap::new(),
+            affinity:               HashMap::new(),
         }
     }
 
@@ -249,6 +258,64 @@ impl Agent {
             .filter(|m| m.contains(&tag))
             .map(|m| m.as_str())
             .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Attribute growth (FEAT-21)
+    // -----------------------------------------------------------------------
+
+    /// Returns extra DC to add for this attribute when it has been neglected
+    /// (no successful use in the last 48 ticks). Returns 0 if no debuff.
+    pub fn neglect_extra_dc(&self, attr: &str, current_tick: u32) -> u32 {
+        if attr.is_empty() || current_tick < 48 { return 0; }
+        let last = self.attribute_last_success.get(attr).copied().unwrap_or(0);
+        if current_tick.saturating_sub(last) > 48 { 1 } else { 0 }
+    }
+
+    /// Grant 1 XP for `attr`. Returns `Some(new_score)` if the attribute leveled up.
+    pub fn grant_xp(&mut self, attr: &str) -> Option<u32> {
+        if attr.is_empty() { return None; }
+        let xp = self.attribute_xp.entry(attr.to_string()).or_insert(0);
+        *xp += 1;
+        if *xp >= 5 {
+            *xp = 0;
+            let score = match attr {
+                "vigor" => &mut self.attributes.vigor,
+                "wit"   => &mut self.attributes.wit,
+                "grace" => &mut self.attributes.grace,
+                "heart" => &mut self.attributes.heart,
+                "numen" => &mut self.attributes.numen,
+                _       => return None,
+            };
+            if *score < 10 {
+                *score += 1;
+                return Some(*score);
+            }
+        }
+        None
+    }
+
+    /// Record a successful attribute use at `tick` (clears neglect debuff).
+    pub fn record_success(&mut self, attr: &str, tick: u32) {
+        if !attr.is_empty() {
+            self.attribute_last_success.insert(attr.to_string(), tick);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Affinity / relationships (FEAT-18)
+    // -----------------------------------------------------------------------
+
+    /// Add `delta` to affinity toward `other`, clamping to -100..=100.
+    pub fn update_affinity(&mut self, other: &str, delta: f32) {
+        let v = self.affinity.entry(other.to_string()).or_insert(0.0);
+        *v = (*v + delta).clamp(-100.0, 100.0);
+    }
+
+    /// Chat social restore bonus from affinity (range ≈ -10..=+10).
+    pub fn affinity_social_bonus(&self, other_name: &str) -> f32 {
+        let v = self.affinity.get(other_name).copied().unwrap_or(0.0);
+        (v * 0.1).clamp(-10.0, 10.0)
     }
 
     pub fn push_memory(&mut self, entry: String, max_size: usize) {

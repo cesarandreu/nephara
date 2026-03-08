@@ -83,6 +83,11 @@ pub async fn run_simulation(
                     day:        ev.day,
                     text:       ev.text.clone(),
                 },
+                // FEAT-19: world events show as WorldEvent TUI messages
+                DayEventKind::WorldEvent => TuiEvent::WorldEvent {
+                    day:  ev.day,
+                    text: ev.text.clone(),
+                },
             };
             let _ = tx.send(tui_ev).await;
         }
@@ -160,6 +165,17 @@ pub async fn run_simulation(
                 &world.run_log.run_id,
                 total_ticks,
                 &notable_by_agent[i],
+            );
+        }
+        // FEAT-21: persist attribute growth
+        // FEAT-18: persist relationships
+        for agent in &world.agents {
+            runlog::save_growth(
+                &souls_dir, agent.name(), &world.run_log.run_id,
+                &agent.attributes, &agent.attribute_xp,
+            );
+            runlog::save_relationships(
+                &souls_dir, agent.name(), &world.run_log.run_id, &agent.affinity,
             );
         }
     }

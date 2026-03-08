@@ -133,6 +133,12 @@ journal_summary_max_tokens    = 200
 [world]
 resource_respawn_ticks = 20
 
+[events]
+storm_prob    = 0.005   # ~once per 200 ticks
+festival_prob = 0.003   # ~once per 333 ticks
+windfall_prob = 0.010   # ~once per 100 ticks
+residue_prob  = 0.008   # ~once per 125 ticks
+
 [actions.praise]
 fun_restore    = 10.0
 energy_restore = 5.0

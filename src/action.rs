@@ -139,6 +139,8 @@ pub struct Resolution {
     pub dc:           u32,
     pub need_changes: NeedChanges,
     pub duration:     u32,
+    /// The governing attribute name (e.g. "vigor"). Empty for auto-success actions.
+    pub attribute:    &'static str,
 }
 
 impl Resolution {
@@ -188,21 +190,36 @@ fn base_changes(cfg: &ActionConfig) -> NeedChanges {
     }
 }
 
+/// Returns the governing attribute name for a given action (empty string for auto-success actions).
+pub fn action_attribute(action: &Action) -> &'static str {
+    match action {
+        Action::Cook        => "wit",
+        Action::Forage      => "grace",
+        Action::Fish        => "grace",
+        Action::Exercise    => "vigor",
+        Action::Chat { .. } => "heart",
+        Action::Explore     => "vigor",
+        _                   => "",
+    }
+}
+
 /// Resolve a non-magic action. Returns a Resolution.
+/// `extra_dc` is added to the effective DC (use for storm bonus, neglect debuff, etc.).
 pub fn resolve(
     action:     &Action,
     attributes: &Attributes,
     needs:      &Needs,
     config:     &Config,
     is_night:   bool,
+    extra_dc:   u32,
     rng:        &mut StdRng,
 ) -> Resolution {
     let (cfg, attr_name) = action_cfg_and_attr(action, config);
-    let dc               = effective_dc(action, cfg, is_night, config);
+    let base_dc          = effective_dc(action, cfg, is_night, config);
     let base             = base_changes(cfg);
 
-    // Auto-success actions (dc = 0)
-    if dc == 0 {
+    // Auto-success actions (base dc = 0, ignoring extra_dc overrides)
+    if base_dc == 0 {
         let duration = cfg.duration_ticks.unwrap_or(1);
         return Resolution {
             action: action.clone(),
@@ -210,9 +227,11 @@ pub fn resolve(
             roll: 0, modifier: 0, penalty: 0, total: 0, dc: 0,
             need_changes: base,
             duration,
+            attribute: attr_name,
         };
     }
 
+    let dc       = base_dc + extra_dc;
     let roll     = rng.gen_range(1u32..=20);
     let modifier = attributes.modifier(attr_name);
     let penalty  = needs.penalty(config, attr_name);
@@ -241,6 +260,7 @@ pub fn resolve(
         roll, modifier, penalty, total, dc,
         need_changes,
         duration: 1,
+        attribute: attr_name,
     }
 }
 
