@@ -93,7 +93,8 @@ pub struct ResolutionConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryConfig {
-    pub buffer_size: usize,
+    pub buffer_size:   usize,
+    pub journal_n_runs: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -116,7 +117,8 @@ pub struct LlmConfig {
     pub smart_ollama_url:       Option<String>,
     pub narrator_max_tokens:    u32,
     pub desires_max_tokens:     u32,
-    pub oracle_max_tokens:      u32,
+    pub oracle_max_tokens:           u32,
+    pub journal_summary_max_tokens:  u32,
     /// When Some(false), passes `think: false` to disable chain-of-thought on thinking models.
     /// Leave unset (None) for standard models; set to false for qwen3, deepseek-r1, etc.
     pub think:                  Option<bool>,

@@ -203,6 +203,8 @@ pub struct Agent {
     pub life_story:        String,
     pub desires:           Option<String>,
     pub oracle_pending:    bool,
+    /// Summary (or raw excerpt) of past journal entries, injected into prompts.
+    pub journal_summary:   String,
 }
 
 impl Agent {
@@ -233,6 +235,7 @@ impl Agent {
             life_story:        String::new(),
             desires:           None,
             oracle_pending:    false,
+            journal_summary:   String::new(),
         }
     }
 

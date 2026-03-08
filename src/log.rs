@@ -384,6 +384,44 @@ pub fn archive_oracle_response(souls_dir: &str, agent_name: &str, run_id: &str, 
 }
 
 // ---------------------------------------------------------------------------
+// Journal excerpt loader (FEAT-20)
+// ---------------------------------------------------------------------------
+
+/// Read the last `n_days` narrative day-sections from an agent's journal file.
+/// Day sections are those whose header matches "## Run ... Day ... —".
+/// Returns an empty string when no sections are found or the file is missing.
+pub fn load_journal_excerpt(souls_dir: &str, name: &str, n_days: usize) -> String {
+    let path = format!("{}/{}.journal.md", souls_dir, name.to_lowercase());
+    let content = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+
+    let mut sections: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+
+    for line in content.lines() {
+        // Detect day-narrative headers: "## Run ... Day ... — date"
+        if line.starts_with("## Run ") && line.contains(" Day ") && line.contains(" — ") {
+            if let Some(s) = current.take() { sections.push(s); }
+            current = Some(format!("{}\n", line));
+        } else if line.starts_with("## ") {
+            // Some other header (e.g. bullet-list run summary) — flush and skip
+            if let Some(s) = current.take() { sections.push(s); }
+        } else if let Some(ref mut s) = current {
+            s.push_str(line);
+            s.push('\n');
+        }
+    }
+    if let Some(s) = current { sections.push(s); }
+
+    if sections.is_empty() { return String::new(); }
+
+    let start = sections.len().saturating_sub(n_days);
+    sections[start..].join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Story persistence
 // ---------------------------------------------------------------------------
 
@@ -488,15 +526,19 @@ pub fn print_run_summary(
 // ---------------------------------------------------------------------------
 
 pub fn write_run_summary(
-    run_id:         &str,
-    seed:           u64,
-    total_ticks:    u32,
-    agents:         &[Agent],
-    initial_needs:  &[(String, crate::agent::Needs)],
-    magic_count:    u32,
-    notable_events: &[String],
+    run_id:          &str,
+    seed:            u64,
+    total_ticks:     u32,
+    agents:          &[Agent],
+    initial_needs:   &[(String, crate::agent::Needs)],
+    magic_count:     u32,
+    notable_events:  &[String],
     run_duration_ms: u64,
-    is_test_run:    bool,
+    is_test_run:     bool,
+    backend:         &str,
+    model:           &str,
+    smart_model:     Option<&str>,
+    llm_url:         &str,
 ) {
     if is_test_run { return; }
 
@@ -505,9 +547,12 @@ pub fn write_run_summary(
     let dir     = format!("runs/{}", run_id);
     let path    = format!("{}/summary.md", dir);
 
+    let smart_str = smart_model.unwrap_or("—");
     let mut body = format!(
-        "# Run {} Summary\n\nGenerated: {}\n\n## Overview\n- Seed: {}\n- Duration: {} ticks / {} day{}\n- Agents: {}\n- Magic spells cast: {}\n- Wall time: {:.1}s\n\n",
+        "# Run {} Summary\n\nGenerated: {}\n\n## Config\n- Backend: {}\n- Model: {}\n- Smart model: {}\n- LLM URL: {}\n- Seed: {}\n- Ticks: {}\n- Agents: {}\n\n## Overview\n- Seed: {}\n- Duration: {} ticks / {} day{}\n- Agents: {}\n- Magic spells cast: {}\n- Wall time: {:.1}s\n\n",
         run_id, date,
+        backend, model, smart_str, llm_url,
+        seed, total_ticks, agents.len(),
         seed,
         total_ticks, days, if days == 1 { "" } else { "s" },
         agents.len(),

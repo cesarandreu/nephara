@@ -306,6 +306,42 @@ impl World {
                 agent.oracle_pending = true;
                 tracing::info!(agent = %agent.identity.name, "Oracle response pending");
             }
+            // FEAT-20: load raw journal excerpt; will be summarized by summarize_journal_memories()
+            agent.journal_summary = runlog::load_journal_excerpt(
+                &self.souls_dir, &agent.identity.name, self.config.memory.journal_n_runs,
+            );
+        }
+    }
+
+    /// FEAT-20: LLM-summarize each agent's raw journal excerpt into 1–2 sentences.
+    /// Skipped in mock/test mode; keeps raw excerpt on LLM failure.
+    pub async fn summarize_journal_memories(&mut self) {
+        if self.is_test_run { return; }
+
+        let n_agents = self.agents.len();
+        let mut loaded = 0usize;
+        for i in 0..n_agents {
+            let excerpt = self.agents[i].journal_summary.clone();
+            if excerpt.is_empty() { continue; }
+            let name = self.agents[i].identity.name.clone();
+            let prompt = format!(
+                "You are {}. Here are your recent journal entries:\n{}\n\nSummarize in 1-2 sentences what {} remembers from past days.",
+                name, excerpt, name
+            );
+            let max_tokens = self.config.llm.journal_summary_max_tokens;
+            match self.llm_smart.generate(&prompt, max_tokens, Some(self.seed), None, None).await {
+                Ok(summary) => {
+                    let summary = summary.trim().to_string();
+                    if !summary.is_empty() {
+                        self.agents[i].journal_summary = summary;
+                        loaded += 1;
+                    }
+                }
+                Err(e) => warn!("Journal memory summarization failed for {}: {}", name, e),
+            }
+        }
+        if loaded > 0 {
+            tracing::info!("Loaded journal memories for {} agents", loaded);
         }
     }
 
@@ -1412,12 +1448,18 @@ impl World {
             String::new()
         };
 
+        let remembered_past = if !agent.journal_summary.is_empty() {
+            format!("REMEMBERED PAST:\n{}\n\n", agent.journal_summary)
+        } else {
+            String::new()
+        };
+
         format!(
             r#"You are {name}. {personality}
 
 {backstory}
 {self_decl_block}{magic_block}
-YOUR STORY SO FAR:
+{remembered_past}YOUR STORY SO FAR:
 {story}
 
 TODAY'S INTENTION:
@@ -1457,6 +1499,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             backstory        = agent.identity.backstory,
             self_decl_block  = self_decl_block,
             magic_block      = magic_block,
+            remembered_past  = remembered_past,
             story            = story_block,
             intentions       = intentions_block,
             loc_name         = loc_name,

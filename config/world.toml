@@ -103,7 +103,8 @@ dc_hard       = 16
 night_dc_bonus = 4   # Added to Forage/Explore DCs at night
 
 [memory]
-buffer_size = 20
+buffer_size    = 20
+journal_n_runs = 3   # how many past run-day sections to load per agent
 
 [simulation]
 # default_run_ticks    = 144   # 3 days
@@ -126,7 +127,8 @@ think = false                        # set to false to disable chain-of-thought 
 thinking_budget_chars  = 8000        # abort stream if thinking tokens exceed this many chars
 narrator_max_tokens    = 1000
 desires_max_tokens     = 2000
-oracle_max_tokens      = 1500
+oracle_max_tokens             = 1500
+journal_summary_max_tokens    = 200
 
 [world]
 resource_respawn_ticks = 20

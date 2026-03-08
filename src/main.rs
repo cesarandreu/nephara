@@ -253,6 +253,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         backend, smart_backend, run_log, cli.souls.clone(), is_test_run,
     )?;
     world.load_stories().await;
+    world.summarize_journal_memories().await;
 
     let total_ticks = cli.ticks.unwrap_or(cfg.simulation.default_run_ticks);
 
@@ -335,8 +336,8 @@ async fn run_streaming(
 
     // Print banner
     world.run_log.write_line(&format!(
-        "Nephara — seed:{} | {} ticks | backend:{}",
-        seed, total_ticks, backend_name
+        "Nephara — seed:{} | {} ticks | backend:{} | model:{}",
+        seed, total_ticks, backend_name, world.config.llm.model
     ));
     world.run_log.write_line(&format!(
         "Agents: {}",
@@ -406,6 +407,10 @@ async fn run_streaming(
 
     // Post-run summary markdown (FEAT-11)
     let run_duration_ms = run_start.elapsed().as_millis() as u64;
+    let llm_url = match backend_name {
+        "ollama" => cfg.llm.ollama_url.clone(),
+        _        => cfg.llm.llamacpp_url.clone(),
+    };
     log::write_run_summary(
         &world.run_log.run_id,
         seed,
@@ -416,6 +421,10 @@ async fn run_streaming(
         &all_notable,
         run_duration_ms,
         world.is_test_run,
+        backend_name,
+        &cfg.llm.model,
+        cfg.llm.smart_model.as_deref(),
+        &llm_url,
     );
 
     info!("Simulation complete. Seed: {}", seed);

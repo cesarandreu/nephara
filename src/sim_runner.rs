@@ -37,8 +37,8 @@ pub async fn run_simulation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Banner to file
     world.run_log.write_line(&format!(
-        "Nephara — seed:{} | {} ticks | backend:{}",
-        seed, total_ticks, backend_name
+        "Nephara — seed:{} | {} ticks | backend:{} | model:{}",
+        seed, total_ticks, backend_name, world.config.llm.model
     ));
     world.run_log.write_line(&format!(
         "Agents: {}",
@@ -177,6 +177,10 @@ pub async fn run_simulation(
 
     // Post-run summary markdown (FEAT-11)
     let run_duration_ms = run_start.elapsed().as_millis() as u64;
+    let llm_url = match backend_name.as_str() {
+        "ollama" => world.config.llm.ollama_url.clone(),
+        _        => world.config.llm.llamacpp_url.clone(),
+    };
     runlog::write_run_summary(
         &world.run_log.run_id,
         seed,
@@ -187,6 +191,10 @@ pub async fn run_simulation(
         &all_notable,
         run_duration_ms,
         world.is_test_run,
+        &backend_name,
+        &world.config.llm.model,
+        world.config.llm.smart_model.as_deref(),
+        &llm_url,
     );
 
     // Send completion event
