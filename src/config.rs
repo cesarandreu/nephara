@@ -12,6 +12,15 @@ pub struct Config {
     pub llm:        LlmConfig,
     pub world:      WorldConfig,
     pub events:     EventsConfig,
+    pub agent:      AgentConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentConfig {
+    /// Max rumors stored per agent-about-agent pair.
+    pub beliefs_max_per_agent:   usize,
+    /// How many beliefs (per agent) to inject into the perception prompt.
+    pub beliefs_in_prompt_count: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,6 +89,7 @@ pub struct ActionsConfig {
     pub read_oracle:  ActionConfig,
     pub praise:       ActionConfig,
     pub compose:      ActionConfig,
+    pub gossip:       ActionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

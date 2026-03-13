@@ -49,6 +49,8 @@ pub enum Action {
     Praise { praise_text: String },
     Compose { haiku: String },
     ReadOracle,
+    /// Gossip about another agent (FEAT-22).
+    Gossip { about: String, rumor: String },
     /// Fallback when requested action fails validation.
     Wander,
 }
@@ -73,6 +75,7 @@ impl Action {
             Action::Praise { .. }     => "Praise",
             Action::Compose { .. }    => "Compose",
             Action::ReadOracle        => "Read Oracle",
+            Action::Gossip { .. }     => "Gossip",
             Action::Wander            => "Wander",
         }
     }
@@ -86,6 +89,7 @@ impl Action {
             Action::Praise { praise_text }     => format!("Praise: \"{}\"", praise_text),
             Action::Compose { haiku }          => format!("Compose: \"{}\"", haiku),
             Action::ReadOracle                 => "Read Oracle".to_string(),
+            Action::Gossip { about, .. }       => format!("Gossip about {}", about),
             other => other.name().to_string(),
         }
     }
@@ -294,6 +298,7 @@ pub fn action_cfg_and_attr<'a>(action: &Action, config: &'a Config) -> (&'a Acti
         Action::Praise { .. }    => (&config.actions.praise,      ""),
         Action::Compose { .. }   => (&config.actions.compose,     ""),
         Action::ReadOracle       => (&config.actions.read_oracle,  ""),
+        Action::Gossip { .. }    => (&config.actions.gossip,       ""),
         Action::Wander           => (&config.actions.rest,        ""),
     }
 }
@@ -436,6 +441,16 @@ pub fn action_from_name(name: &str, target: Option<&str>, intent: Option<&str>) 
             Action::Compose { haiku: h }
         }
         "read oracle" | "read_oracle" => Action::ReadOracle,
+        "gossip" => {
+            let about = target.unwrap_or("").to_string();
+            let rumor = intent.unwrap_or("I noticed something about them").to_string();
+            if about.is_empty() {
+                tracing::warn!("Gossip action with no target, defaulting to Wander");
+                Action::Wander
+            } else {
+                Action::Gossip { about, rumor }
+            }
+        }
         other => {
             tracing::warn!("Unknown action '{}', defaulting to Wander", other);
             Action::Wander

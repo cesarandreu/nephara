@@ -350,6 +350,8 @@ impl World {
             agent.attribute_xp = growth.xp;
             // FEAT-18: load affinity / relationships
             agent.affinity = runlog::load_relationships(&self.souls_dir, &agent.identity.name);
+            // FEAT-23: load beliefs
+            agent.beliefs  = runlog::load_beliefs(&self.souls_dir, &agent.identity.name);
         }
     }
 
@@ -702,6 +704,17 @@ impl World {
                 }
             }
 
+            Action::Gossip { about, rumor } => {
+                // Validate that `about` names a known agent other than self
+                let normalized = self.agents.iter()
+                    .find(|a| a.id != idx && a.name().eq_ignore_ascii_case(&about))
+                    .map(|a| a.name().to_string());
+                match normalized {
+                    Some(name) => Action::Gossip { about: name, rumor },
+                    None       => self.wander_action(idx),
+                }
+            }
+
             other => other,
         }
     }
@@ -796,6 +809,38 @@ impl World {
                         llm_duration_ms:    None,
                     })
                 }
+            }
+
+            // ---- Gossip ----
+            Action::Gossip { about, rumor } => {
+                let cfg          = self.config.actions.gossip.clone();
+                let need_changes = crate::agent::NeedChanges {
+                    energy: cfg.energy_drain.map(|d| -d),
+                    fun:    cfg.fun_restore,
+                    social: cfg.social_restore,
+                    ..Default::default()
+                };
+                self.agents[idx].needs.apply(&need_changes);
+
+                let max_beliefs = self.config.agent.beliefs_max_per_agent;
+                self.agents[idx].update_belief(&about, rumor.clone(), max_beliefs);
+
+                let snippet = &rumor[..rumor.len().min(60)];
+                let mem = format!("Tick {tick} | Day {day} | {tod} | Gossiped about {about}: \"{snippet}\"");
+                let buf = self.config.memory.buffer_size;
+                self.agents[idx].push_memory(mem, buf);
+
+                let name = self.agents[idx].name().to_string();
+                Ok(TickEntry {
+                    agent_id:           idx,
+                    agent_pos:          self.agents[idx].pos,
+                    agent_name:         name.clone(),
+                    location:           loc_name.to_string(),
+                    action_line:        format!("Gossip about {}", about),
+                    outcome_line:       format!("{} is whispering about {}.", name, about),
+                    outcome_tier_label: None,
+                    llm_duration_ms:    None,
+                })
             }
 
             // ---- Chat ----
@@ -1048,7 +1093,7 @@ impl World {
         self.run_log.write_llm_debug("chat",
             &format!("{}&{}", self.agents[idx].name(), self.agents[target_idx].name()),
             &chat_prompt, &raw_chat);
-        let (summary, exchange) = Self::parse_chat_response(&raw_chat);
+        let (summary, exchange, chat_gossip) = Self::parse_chat_response(&raw_chat);
 
         // FEAT-21: neglect + storm extra DC for Heart
         let neglect_dc = self.agents[idx].neglect_extra_dc("heart", tick);
@@ -1086,6 +1131,18 @@ impl World {
         let initiator_name_own = self.agents[idx].name().to_string();
         self.agents[idx].update_affinity(&target_name_own, delta_a);
         self.agents[target_idx].update_affinity(&initiator_name_own, delta_b);
+
+        // FEAT-22: chat gossip — store rumor in both chatting agents' belief maps
+        if let Some((about_name, rumor_text)) = chat_gossip {
+            let normalized = self.agents.iter()
+                .find(|a| a.id != idx && a.id != target_idx && a.name().eq_ignore_ascii_case(&about_name))
+                .map(|a| a.name().to_string());
+            if let Some(about) = normalized {
+                let max_beliefs = self.config.agent.beliefs_max_per_agent;
+                self.agents[idx].update_belief(&about, rumor_text.clone(), max_beliefs);
+                self.agents[target_idx].update_belief(&about, rumor_text, max_beliefs);
+            }
+        }
 
         let buf      = self.config.memory.buffer_size;
         let mem_a    = format!("Tick {tick} | Day {day} | {tod} | Chat with {} — \"{}\". [{}]",
@@ -1677,6 +1734,28 @@ impl World {
             String::new()
         };
 
+        // FEAT-23: beliefs about others not currently nearby
+        let nearby_ids: std::collections::HashSet<usize> = self.agents.iter()
+            .filter(|a| a.id != idx && Self::chebyshev_dist(a.pos, pos) <= 1)
+            .map(|a| a.id)
+            .collect();
+        let max_beliefs = self.config.agent.beliefs_in_prompt_count;
+        let mut belief_lines: Vec<String> = Vec::new();
+        for other_agent in &self.agents {
+            if other_agent.id == idx || nearby_ids.contains(&other_agent.id) { continue; }
+            if let Some(ab) = agent.beliefs.get(other_agent.name()) {
+                let rumors: Vec<&str> = ab.rumors.iter().rev().take(max_beliefs).map(|s| s.as_str()).collect();
+                for r in rumors {
+                    belief_lines.push(format!("- {}: \"{}\"", other_agent.name(), r));
+                }
+            }
+        }
+        let beliefs_block = if belief_lines.is_empty() {
+            String::new()
+        } else {
+            format!("\nBELIEFS ABOUT OTHERS:\n{}\n", belief_lines.join("\n"))
+        };
+
         format!(
             r#"You are {name}. {personality}
 
@@ -1698,7 +1777,7 @@ CURRENT STATE:
 - Hygiene:  {hygiene:.0}/100  (100=clean, 0=filthy)
 {warnings}
 
-NEARBY: {nearby}{affinity_block}{event_note}
+NEARBY: {nearby}{affinity_block}{beliefs_block}{event_note}
 VIEWPORT (you are [X]):
 {viewport}
 (legend: F=Forest ~=River S=Square V=Tavern W=Well M=Meadow h=Home P=Temple X=you)
@@ -1715,7 +1794,7 @@ Speak your desire and it will manifest — though words carry all their meanings
 Avoid repeating the same action twice in a row. Your personality should guide what you do.
 
 Choose ONE action. Respond with ONLY a JSON object:
-{{"action": "action_name", "target": "optional_target_name", "intent": "if casting, your spoken desire", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
+{{"action": "action_name", "target": "optional_target_name", "intent": "if casting, your spoken desire or gossip rumor content", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
             name             = agent.identity.name,
             personality      = agent.identity.personality,
             backstory        = agent.identity.backstory,
@@ -1738,6 +1817,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             warnings         = warnings_str,
             nearby           = nearby_str,
             affinity_block   = affinity_block,
+            beliefs_block    = beliefs_block,
             event_note       = event_note,
             viewport         = viewport,
             region_note      = region_note,
@@ -2014,6 +2094,59 @@ Choose ONE action. Respond with ONLY a JSON object:
         let b_desires      = b.desires.as_deref().unwrap_or("(no known desires)");
         let a_name         = a.identity.name.clone();
         let b_name         = b.identity.name.clone();
+
+        // FEAT-23: beliefs about third parties (agents not in this conversation)
+        let mut beliefs_lines: Vec<String> = Vec::new();
+        for agent_ref in &[a, b] {
+            for other in &self.agents {
+                if other.id == a_idx || other.id == b_idx { continue; }
+                if let Some(ab) = agent_ref.beliefs.get(other.name()) {
+                    if let Some(r) = ab.rumors.last() {
+                        beliefs_lines.push(format!("  {} has heard about {}: \"{}\"",
+                            agent_ref.identity.name, other.name(), r));
+                    }
+                }
+            }
+        }
+        let beliefs_section = if beliefs_lines.is_empty() {
+            String::new()
+        } else {
+            format!("\nWhat they know about others:\n{}\n", beliefs_lines.join("\n"))
+        };
+
+        // Gossip note: a's warmth toward non-present agents
+        let warmth_note = {
+            let relevant: Vec<String> = self.agents.iter()
+                .filter(|o| o.id != a_idx && o.id != b_idx)
+                .filter_map(|o| {
+                    let v = a.affinity.get(o.name()).copied().unwrap_or(0.0);
+                    if v > 20.0 {
+                        Some(format!("{} thinks warmly of {}", a_name, o.name()))
+                    } else if v < -20.0 {
+                        Some(format!("{} feels cold toward {}", a_name, o.name()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if relevant.is_empty() {
+                String::new()
+            } else {
+                format!("\n(Gossip note: {})\n", relevant.join("; "))
+            }
+        };
+
+        let other_names: Vec<String> = self.agents.iter()
+            .filter(|o| o.id != a_idx && o.id != b_idx)
+            .map(|o| o.name().to_string())
+            .collect();
+        let gossip_hint = if !other_names.is_empty() {
+            format!("\nIf either of you has something to say about someone not present ({}), include optional gossip.\n",
+                other_names.join(", "))
+        } else {
+            String::new()
+        };
+
         format!(
             r#"Two villagers in Nephara are having a conversation.
 
@@ -2026,29 +2159,38 @@ Choose ONE action. Respond with ONLY a JSON object:
   Today's intentions: {b_intentions}
   Desires: {b_desires}
   Most recent memory: {b_mem}
-
-Write a brief realistic exchange (1-2 lines each), then a one-sentence summary.
+{beliefs_section}{warmth_note}
+Write a brief realistic exchange (1-2 lines each), then a one-sentence summary.{gossip_hint}
 Respond ONLY with JSON — no other text:
-{{"summary": "one sentence topic, no names, no quotes", "exchange": "{a_name}: ...\n{b_name}: ..."}}
+{{"summary": "one sentence topic, no names, no quotes", "exchange": "{a_name}: ...\n{b_name}: ...", "gossip": {{"about": "name or null", "content": "rumor text or null"}}}}
 "#,
-            a_name        = a_name,
-            a_personality = a.identity.personality,
-            b_name        = b_name,
-            b_personality = b.identity.personality,
-            a_intentions  = a_intentions,
-            b_intentions  = b_intentions,
-            a_desires     = a_desires,
-            b_desires     = b_desires,
-            a_mem         = a_mem,
-            b_mem         = b_mem,
+            a_name          = a_name,
+            a_personality   = a.identity.personality,
+            b_name          = b_name,
+            b_personality   = b.identity.personality,
+            a_intentions    = a_intentions,
+            b_intentions    = b_intentions,
+            a_desires       = a_desires,
+            b_desires       = b_desires,
+            a_mem           = a_mem,
+            b_mem           = b_mem,
+            beliefs_section = beliefs_section,
+            warmth_note     = warmth_note,
+            gossip_hint     = gossip_hint,
         )
     }
 
-    fn parse_chat_response(raw: &str) -> (String, Option<String>) {
+    fn parse_chat_response(raw: &str) -> (String, Option<String>, Option<(String, String)>) {
+        #[derive(serde::Deserialize)]
+        struct GossipField {
+            about:   Option<String>,
+            content: Option<String>,
+        }
         #[derive(serde::Deserialize)]
         struct ChatResponse {
             summary:  String,
             exchange: Option<String>,
+            gossip:   Option<GossipField>,
         }
 
         fn extract_fence(s: &str) -> Option<String> {
@@ -2059,15 +2201,24 @@ Respond ONLY with JSON — no other text:
             Some(rest[..end].trim().to_string())
         }
 
+        fn extract_gossip(cr: &ChatResponse) -> Option<(String, String)> {
+            let g = cr.gossip.as_ref()?;
+            let about   = g.about.as_ref().filter(|s| !s.is_empty() && s.as_str() != "null")?;
+            let content = g.content.as_ref().filter(|s| !s.is_empty() && s.as_str() != "null")?;
+            Some((about.clone(), content.clone()))
+        }
+
         if let Ok(cr) = serde_json::from_str::<ChatResponse>(raw.trim()) {
-            return (cr.summary, cr.exchange.filter(|e| !e.is_empty()));
+            let gossip = extract_gossip(&cr);
+            return (cr.summary, cr.exchange.filter(|e| !e.is_empty()), gossip);
         }
         if let Some(json) = extract_fence(raw) {
             if let Ok(cr) = serde_json::from_str::<ChatResponse>(&json) {
-                return (cr.summary, cr.exchange.filter(|e| !e.is_empty()));
+                let gossip = extract_gossip(&cr);
+                return (cr.summary, cr.exchange.filter(|e| !e.is_empty()), gossip);
             }
         }
-        (raw.trim().to_string(), None)
+        (raw.trim().to_string(), None, None)
     }
 
     // -----------------------------------------------------------------------
@@ -2099,6 +2250,7 @@ Respond ONLY with JSON — no other text:
         v.push("pray");
         v.push("praise");
         v.push("compose");
+        v.push("gossip");
         if tile == TileType::Temple && self.agents[idx].oracle_pending {
             v.push("read_oracle");
         }
@@ -2171,6 +2323,18 @@ Respond ONLY with JSON — no other text:
                     cfg.actions.chat.fun_restore.unwrap_or(0.0),
                     cfg.actions.chat.dc));
             }
+        }
+
+        // Gossip names a known OTHER agent in target, rumor content in intent
+        let other_names: Vec<String> = self.agents.iter()
+            .filter(|a| a.id != idx)
+            .map(|a| a.name().to_string())
+            .collect();
+        if !other_names.is_empty() {
+            v.push(format!("gossip — whisper about another villager (+{:.0} social +{:.0} fun, always works). Use target: name of the person ({}), intent: what you've heard or noticed about them.",
+                cfg.actions.gossip.social_restore.unwrap_or(0.0),
+                cfg.actions.gossip.fun_restore.unwrap_or(0.0),
+                other_names.join("/")));
         }
 
         v.push(format!("pray — speak sincerely to the divine (+{:.0} fun +{:.0} social, always works). Your prayer will be heard and kept by the one who made this world. They may answer you.",

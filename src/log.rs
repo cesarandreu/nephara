@@ -5,7 +5,7 @@ use chrono::Local;
 use colored::Colorize;
 use tracing::warn;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentBeliefs};
 use crate::color;
 
 // ---------------------------------------------------------------------------
@@ -594,6 +594,63 @@ pub fn append_journal(
         Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
         Err(e)    => warn!("Could not append journal for {}: {}", agent_name, e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Belief persistence (FEAT-22/23)
+// ---------------------------------------------------------------------------
+
+/// Append current beliefs to `souls/{name}.beliefs.md` (append-only).
+pub fn save_beliefs(
+    souls_dir: &str,
+    name:      &str,
+    run_id:    &str,
+    beliefs:   &std::collections::HashMap<String, AgentBeliefs>,
+) {
+    if beliefs.is_empty() { return; }
+    let path  = format!("{}/{}.beliefs.md", souls_dir, name.to_lowercase());
+    let date  = Local::now().format("%Y-%m-%d");
+    let mut entry = format!("\n## Run {} — {}\n", run_id, date);
+    let mut pairs: Vec<_> = beliefs.iter().collect();
+    pairs.sort_by_key(|(k, _)| k.as_str());
+    for (about, ab) in pairs {
+        for rumor in &ab.rumors {
+            entry.push_str(&format!("- {}: \"{}\"\n", about, rumor));
+        }
+    }
+    let file = OpenOptions::new().create(true).append(true).open(&path);
+    match file {
+        Ok(mut f) => { let _ = f.write_all(entry.as_bytes()); }
+        Err(e)    => warn!("Could not save beliefs for {}: {}", name, e),
+    }
+}
+
+/// Load accumulated beliefs from `souls/{name}.beliefs.md`.
+/// Returns empty map if file absent or unparseable.
+pub fn load_beliefs(souls_dir: &str, name: &str) -> std::collections::HashMap<String, AgentBeliefs> {
+    let path    = format!("{}/{}.beliefs.md", souls_dir, name.to_lowercase());
+    let content = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return Default::default() };
+    let mut map: std::collections::HashMap<String, AgentBeliefs> = Default::default();
+    for line in content.lines() {
+        // Format: "- Rowan: \"some rumor text\""
+        let line = line.trim();
+        if !line.starts_with('-') { continue; }
+        let line = line.trim_start_matches('-').trim();
+        // Split on first `: "` to get name and rumor
+        if let Some(colon_pos) = line.find(':') {
+            let about = line[..colon_pos].trim();
+            let rest  = line[colon_pos + 1..].trim();
+            // Strip surrounding quotes if present
+            let rumor = rest.trim_matches('"');
+            if !about.is_empty() && !rumor.is_empty() {
+                map.entry(about.to_string())
+                    .or_insert_with(AgentBeliefs::default)
+                    .rumors
+                    .push(rumor.to_string());
+            }
+        }
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------

@@ -149,3 +149,14 @@ dc             = 0
 fun_restore    = 10.0
 social_restore = 5.0
 dc             = 0
+
+[actions.gossip]
+description    = "Whisper about someone — share an impression or rumor"
+energy_drain   = 2.0
+fun_restore    = 3.0
+social_restore = 5.0
+dc             = 0
+
+[agent]
+beliefs_max_per_agent   = 5   # max rumors stored per agent-about-agent pair
+beliefs_in_prompt_count = 3   # how many beliefs to inject per agent into prompt

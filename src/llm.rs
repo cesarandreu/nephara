@@ -679,6 +679,11 @@ fn mock_actions(rng: &mut StdRng) -> &'static str {
         r#"{"action":"praise","target":null,"intent":"This world is beautiful and I am grateful to be in it","reason":"feeling moved by beauty"}"#,
         r#"{"action":"compose","target":null,"intent":"morning light falls\nthrough the still forest branches\na crow does not move","reason":"feeling poetic"}"#,
         r#"{"action":"read_oracle","target":null,"intent":null,"reason":"something waits at the altar"}"#,
+        r#"{"action":"gossip","target":"Rowan","intent":"I heard she was seen alone by the river at dawn, looking troubled","reason":"sharing what I know"}"#,
+        r#"{"action":"gossip","target":"Thane","intent":"Someone told me he had a rough day yesterday and seemed distant","reason":"passing along what I heard"}"#,
+        r#"{"action":"gossip","target":"Elara","intent":"I noticed she has been spending a lot of time near the Temple lately","reason":"curious about her behavior"}"#,
+        r#"{"action":"gossip","target":"Mira","intent":"I heard Mira was gathering herbs in the forest before anyone else was awake","reason":"just sharing observations"}"#,
+        r#"{"action":"gossip","target":"Sael","intent":"Word is that Sael has been unusually quiet and withdrawn this week","reason":"concerned about them"}"#,
     ];
     let idx = rng.gen_range(0..choices.len());
     choices[idx]

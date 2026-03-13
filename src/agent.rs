@@ -7,6 +7,16 @@ use crate::soul::SoulSeed;
 pub type AgentId = usize;
 
 // ---------------------------------------------------------------------------
+// Beliefs (Theory of Mind — FEAT-23)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentBeliefs {
+    /// Rumors / impressions accumulated about this agent.
+    pub rumors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
 
@@ -211,6 +221,8 @@ pub struct Agent {
     pub attribute_last_success: HashMap<String, u32>,
     /// Affinity toward other agents keyed by name, range -100..=100.
     pub affinity:               HashMap<String, f32>,
+    /// Theory-of-Mind belief map: other_name → accumulated rumors/impressions.
+    pub beliefs:                HashMap<String, AgentBeliefs>,
 }
 
 impl Agent {
@@ -245,6 +257,7 @@ impl Agent {
             attribute_xp:           HashMap::new(),
             attribute_last_success: HashMap::new(),
             affinity:               HashMap::new(),
+            beliefs:                HashMap::new(),
         }
     }
 
@@ -316,6 +329,20 @@ impl Agent {
     pub fn affinity_social_bonus(&self, other_name: &str) -> f32 {
         let v = self.affinity.get(other_name).copied().unwrap_or(0.0);
         (v * 0.1).clamp(-10.0, 10.0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Theory-of-Mind beliefs (FEAT-23)
+    // -----------------------------------------------------------------------
+
+    /// Append a rumor about `about` to this agent's belief map.
+    /// Drops the oldest rumor if over `max_per_agent`.
+    pub fn update_belief(&mut self, about: &str, rumor: String, max_per_agent: usize) {
+        let entry = self.beliefs.entry(about.to_string()).or_insert_with(AgentBeliefs::default);
+        entry.rumors.push(rumor);
+        while entry.rumors.len() > max_per_agent {
+            entry.rumors.remove(0);
+        }
     }
 
     pub fn push_memory(&mut self, entry: String, max_size: usize) {

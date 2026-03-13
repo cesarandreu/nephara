@@ -393,7 +393,7 @@ async fn run_streaming(
                 &notable_by_agent[i],
             );
         }
-        // FEAT-21: persist attribute growth; FEAT-18: persist relationships
+        // FEAT-21: persist attribute growth; FEAT-18: persist relationships; FEAT-23: persist beliefs
         for agent in &world.agents {
             log::save_growth(
                 souls_dir, agent.name(), &world.run_log.run_id,
@@ -401,6 +401,9 @@ async fn run_streaming(
             );
             log::save_relationships(
                 souls_dir, agent.name(), &world.run_log.run_id, &agent.affinity,
+            );
+            log::save_beliefs(
+                souls_dir, agent.name(), &world.run_log.run_id, &agent.beliefs,
             );
         }
     }
