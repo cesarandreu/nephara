@@ -1841,7 +1841,7 @@ impl World {
     // Prayer & admiration quality evaluation
     // -----------------------------------------------------------------------
 
-    async fn evaluate_prayer(&mut self, idx: usize, prayer: &str, day: u32) {
+    async fn evaluate_prayer(&mut self, idx: usize, prayer: &str, _day: u32) {
         let god_name = self.config.world.god_name.clone();
         let name     = self.agents[idx].name().to_string();
         let prompt   = format!(
