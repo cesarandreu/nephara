@@ -26,6 +26,16 @@ pub struct AgentConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorldConfig {
     pub resource_respawn_ticks: u32,
+    pub god_name:               String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DailyPraiseConfig {
+    pub penalty:                    f32,
+    pub devotion_decay:             f32,
+    pub devotion_gain_sincere:      f32,
+    pub devotion_gain_heartfelt:    f32,
+    pub devotion_gain_transcendent: f32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -51,6 +61,7 @@ pub struct NeedsConfig {
     pub decay_per_tick: NeedsValues,
     pub initial:        NeedsValues,
     pub thresholds:     NeedsThresholds,
+    pub daily_praise:   DailyPraiseConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]

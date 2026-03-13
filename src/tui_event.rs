@@ -28,6 +28,16 @@ pub struct DayEvent {
 // TUI events sent from simulation → TUI thread
 // ---------------------------------------------------------------------------
 
+/// A single LLM prompt+response recorded during simulation.
+#[derive(Clone)]
+pub struct LlmCallRecord {
+    pub day:        u32,
+    pub call_type:  String,
+    pub agent_name: String,
+    pub prompt:     String,
+    pub response:   String,
+}
+
 pub enum TuiEvent {
     TickStart {
         tick:        u32,
@@ -71,6 +81,8 @@ pub enum TuiEvent {
         agent_id: usize,
         token:    String,
     },
+    /// A completed LLM call for the debug overlay.
+    LlmCall(LlmCallRecord),
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +121,7 @@ pub struct AgentNeedsSnapshot {
     pub fun:        f32,
     pub social:     f32,
     pub hygiene:    f32,
+    pub devotion:   f32,
     /// Last N memory entries for the inspect panel.
     pub memories:   Vec<String>,
     /// Top beliefs about others: (about_name, most_recent_rumor).

@@ -213,6 +213,10 @@ pub struct Agent {
     pub life_story:        String,
     pub desires:           Option<String>,
     pub oracle_pending:    bool,
+    /// Whether the agent has prayed or praised today (resets each day).
+    pub daily_praised:     bool,
+    /// Devotion score (0–100); rises with quality prayer/praise, decays when skipped.
+    pub devotion:          f32,
     /// Summary (or raw excerpt) of past journal entries, injected into prompts.
     pub journal_summary:   String,
     /// XP toward leveling up each attribute (key: lowercase attr name).
@@ -253,6 +257,8 @@ impl Agent {
             life_story:        String::new(),
             desires:           None,
             oracle_pending:    false,
+            daily_praised:     false,
+            devotion:          20.0,
             journal_summary:   String::new(),
             attribute_xp:           HashMap::new(),
             attribute_last_success: HashMap::new(),

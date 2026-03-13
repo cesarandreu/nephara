@@ -17,7 +17,7 @@ use crate::llm::LlmBackend;
 use crate::log::{self as runlog, RunLog, TickEntry};
 use crate::magic;
 use crate::soul::SoulSeed;
-use crate::tui_event::{AgentNeedsSnapshot, DayEvent, DayEventKind, MapCell, TuiEvent};
+use crate::tui_event::{AgentNeedsSnapshot, DayEvent, DayEventKind, LlmCallRecord, MapCell, TuiEvent};
 
 // ---------------------------------------------------------------------------
 // Grid constants
@@ -235,6 +235,8 @@ pub struct TickResult {
     /// Day-boundary events (morning intentions, evening reflections/desires)
     /// generated during this tick.
     pub day_events:  Vec<DayEvent>,
+    /// LLM calls made during this tick (for the debug overlay).
+    pub llm_calls:   Vec<LlmCallRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +245,7 @@ pub struct TickResult {
 
 pub struct World {
     pub tick_num:            u32,
+    pub current_day:         u32,
     pub agents:              Vec<Agent>,
     pub seed:                u64,
     pub config:              Config,
@@ -254,6 +257,7 @@ pub struct World {
     pub resource_nodes:      Vec<ResourceNode>,
     pub is_test_run:         bool,
     pub pending_day_events:  Vec<DayEvent>,
+    pub pending_llm_calls:   Vec<LlmCallRecord>,
     /// Currently active world event, if any (FEAT-19).
     pub active_event:        Option<ActiveWorldEvent>,
     /// When true (--no-tui mode), stream LLM action tokens to stdout.
@@ -300,6 +304,7 @@ impl World {
         let resource_nodes = build_resource_nodes(n_agents);
         Ok(World {
             tick_num: 0,
+            current_day: 1,
             agents,
             seed,
             config,
@@ -311,6 +316,7 @@ impl World {
             resource_nodes,
             is_test_run,
             pending_day_events: Vec::new(),
+            pending_llm_calls:  Vec::new(),
             active_event: None,
             token_echo: false,
             tui_tx: None,
@@ -517,6 +523,18 @@ impl World {
         }
     }
 
+    /// Write LLM call to the debug file and record it for the TUI overlay.
+    fn log_llm_call(&mut self, call_type: &str, agent_name: &str, prompt: &str, response: &str) {
+        self.run_log.write_llm_debug(call_type, agent_name, prompt, response);
+        self.pending_llm_calls.push(LlmCallRecord {
+            day:        self.current_day,
+            call_type:  call_type.to_string(),
+            agent_name: agent_name.to_string(),
+            prompt:     prompt.to_string(),
+            response:   response.to_string(),
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Tick
     // -----------------------------------------------------------------------
@@ -529,9 +547,41 @@ impl World {
         let is_night    = tick_in_day >= self.config.time.night_start_tick;
         let tod         = runlog::time_of_day(tick_in_day, self.config.time.night_start_tick);
 
+        self.current_day = day;
+
         if tick_in_day == 0 {
             if tick > 0 {
                 let prev_day = day - 1;
+
+                // Daily devotion penalty for agents who didn't pray or praise
+                let penalty_base = self.config.needs.daily_praise.penalty;
+                let decay        = self.config.needs.daily_praise.devotion_decay;
+                for idx in 0..self.agents.len() {
+                    if !self.agents[idx].daily_praised {
+                        let scale   = 1.0 - self.agents[idx].devotion / 100.0;
+                        let penalty = penalty_base * scale;
+                        self.agents[idx].needs.hunger  = (self.agents[idx].needs.hunger  - penalty).max(0.0);
+                        self.agents[idx].needs.energy  = (self.agents[idx].needs.energy  - penalty).max(0.0);
+                        self.agents[idx].needs.fun     = (self.agents[idx].needs.fun     - penalty).max(0.0);
+                        self.agents[idx].needs.social  = (self.agents[idx].needs.social  - penalty).max(0.0);
+                        self.agents[idx].needs.hygiene = (self.agents[idx].needs.hygiene - penalty).max(0.0);
+                        self.agents[idx].devotion = (self.agents[idx].devotion - decay).max(0.0);
+                        let name = self.agents[idx].name().to_string();
+                        let text = format!("{} offered no prayer or praise — a quiet unease settles over them.", name);
+                        self.pending_day_events.push(DayEvent {
+                            kind:       DayEventKind::WorldEvent,
+                            agent_id:   idx,
+                            agent_name: name,
+                            day:        prev_day,
+                            text,
+                        });
+                    }
+                }
+                // Reset daily_praised for the new day
+                for agent in &mut self.agents {
+                    agent.daily_praised = false;
+                }
+
                 for idx in 0..self.agents.len() {
                     self.end_of_day_reflection(idx, prev_day).await?;
                 }
@@ -572,7 +622,8 @@ impl World {
 
         let map        = self.render_map();
         let day_events = std::mem::take(&mut self.pending_day_events);
-        Ok(TickResult { tick, day, time_of_day: tod, entries, map, day_events })
+        let llm_calls  = std::mem::take(&mut self.pending_llm_calls);
+        Ok(TickResult { tick, day, time_of_day: tod, entries, map, day_events, llm_calls })
     }
 
     // -----------------------------------------------------------------------
@@ -635,7 +686,8 @@ impl World {
                     warn!("LLM error for {}: {}", self.agents[idx].name(), e);
                     String::new()
                 });
-            self.run_log.write_llm_debug("action", self.agents[idx].name(), &prompt, &raw);
+            let agent_name_for_log = self.agents[idx].name().to_string();
+            self.log_llm_call("action", &agent_name_for_log, &prompt, &raw);
             debug!(target: "action", agent = %self.agents[idx].name(), raw = %raw, "Agent action response");
             action::parse_response(&raw)
         };
@@ -1049,7 +1101,7 @@ impl World {
                 debug!(target: "narrate", agent = %agent_name_str, action = %res.action.display(),
                        tier = %res.tier.label(), "DM Narrator prompt sent");
                 let narrator_result = llm.generate(&dm_prompt, narrator_max, call_seed, None, None).await;
-                self.run_log.write_llm_debug("narrator", &agent_name_str, &dm_prompt,
+                self.log_llm_call("narrator", &agent_name_str, &dm_prompt,
                     narrator_result.as_ref().map(|s| s.as_str()).unwrap_or(""));
                 let narrative = match narrator_result {
                     Ok(n) if !n.trim().is_empty() => {
@@ -1188,7 +1240,7 @@ impl World {
             .unwrap_or_else(|_| {
                 format!("{} and {} exchange a few words.", self.agents[idx].name(), self.agents[target_idx].name())
             });
-        self.run_log.write_llm_debug("chat",
+        self.log_llm_call("chat",
             &format!("{}&{}", self.agents[idx].name(), self.agents[target_idx].name()),
             &chat_prompt, &raw_chat);
         let (summary, exchange, chat_gossip) = Self::parse_chat_response(&raw_chat);
@@ -1302,7 +1354,8 @@ impl World {
             .generate(&prompt, self.config.llm.interpreter_max_tokens, call_seed, None, None)
             .await
             .unwrap_or_default();
-        self.run_log.write_llm_debug("cast_intent", self.agents[idx].name(), &prompt, &raw);
+        let cast_agent_name = self.agents[idx].name().to_string();
+        self.log_llm_call("cast_intent", &cast_agent_name, &prompt, &raw);
 
         let energy_drain = self.config.actions.cast_intent.energy_drain.unwrap_or(8.0);
         let interpreted  = magic::parse_interpreter_response(&raw)
@@ -1418,9 +1471,17 @@ impl World {
         };
         self.agents[idx].needs.apply(&need_changes);
 
+        self.agents[idx].daily_praised = true;
+
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
             runlog::append_prayer(&self.souls_dir, &self.agents[idx].identity.name, &run_id, day, tick, tod, prayer);
+        }
+
+        // Evaluate prayer quality and apply variable rewards
+        if !self.is_test_run {
+            let prayer_owned = prayer.to_string();
+            self.evaluate_prayer(idx, &prayer_owned, day).await;
         }
 
         let prayer_short = &prayer[..prayer.len().min(60)];
@@ -1500,7 +1561,7 @@ impl World {
                 format!("{} stands in silent awe.", name)
             });
         let reaction = reaction.trim().to_string();
-        self.run_log.write_llm_debug("oracle", &name, &prompt, &reaction);
+        self.log_llm_call("oracle", &name, &prompt, &reaction);
 
         if !self.is_test_run {
             let run_id = self.run_log.run_id.clone();
@@ -1560,6 +1621,7 @@ impl World {
         };
 
         // Apply to admirer
+        self.agents[idx].daily_praised = true;
         self.agents[idx].needs.apply(&admirer_changes);
         let buf = self.config.memory.buffer_size;
         let mem_admirer = format!("Tick {tick} | Day {day} | {tod} | Admired {admired_name}");
@@ -1576,6 +1638,14 @@ impl World {
             let run_id = self.run_log.run_id.clone();
             let entry = format!("From {}: expressed heartfelt admiration.", admirer_name);
             runlog::append_admiration(&self.souls_dir, admired_name, &run_id, day, tick, tod, &entry);
+        }
+
+        // Evaluate admiration quality
+        if !self.is_test_run {
+            if let Some(tidx) = self.agents.iter().position(|a| a.name().eq_ignore_ascii_case(admired_name)) {
+                let admired_name_owned = admired_name.to_string();
+                self.evaluate_admiration(idx, tidx, &admired_name_owned, day).await;
+            }
         }
 
         let admirer_note = admirer_changes.describe();
@@ -1624,7 +1694,7 @@ impl World {
         self.llm_call_counter += 1;
         let llm = Arc::clone(&self.llm);
         let raw = llm.generate(&classify_prompt, 32, call_seed, None, None).await.unwrap_or_default();
-        self.run_log.write_llm_debug("praise_classify", &name, &classify_prompt, &raw);
+        self.log_llm_call("praise_classify", &name, &classify_prompt, &raw);
 
         let sincere = raw.contains("\"sincere\": true") || raw.contains("\"sincere\":true");
 
@@ -1699,7 +1769,7 @@ impl World {
         self.llm_call_counter += 1;
         let llm = Arc::clone(&self.llm);
         let raw = llm.generate(&judge_prompt, 128, call_seed, None, None).await.unwrap_or_default();
-        self.run_log.write_llm_debug("haiku_judge", &name, &judge_prompt, &raw);
+        self.log_llm_call("haiku_judge", &name, &judge_prompt, &raw);
 
         // Parse the judge response
         let (score, verdict) = {
@@ -1768,10 +1838,100 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
+    // Prayer & admiration quality evaluation
+    // -----------------------------------------------------------------------
+
+    async fn evaluate_prayer(&mut self, idx: usize, prayer: &str, day: u32) {
+        let god_name = self.config.world.god_name.clone();
+        let name     = self.agents[idx].name().to_string();
+        let prompt   = format!(
+            "You are evaluating a prayer addressed to {god_name}.\n\
+             Agent: {name}\n\
+             Prayer: \"{prayer}\"\n\n\
+             Score sincerity and depth. Reply with JSON only:\n\
+             {{\"score\": 1-5, \"quality\": \"hollow|sincere|heartfelt|transcendent\"}}",
+        );
+        let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm = Arc::clone(&self.llm);
+        let raw = llm.generate(&prompt, 64, call_seed, None, None).await.unwrap_or_default();
+        self.log_llm_call("prayer_eval", &name, &prompt, &raw);
+
+        let quality   = parse_json_quality_field(&raw);
+        let dp_cfg    = self.config.needs.daily_praise.clone();
+        let (mult, dev_gain): (f32, f32) = match quality.as_str() {
+            "transcendent" => (2.5, dp_cfg.devotion_gain_transcendent),
+            "heartfelt"    => (1.5, dp_cfg.devotion_gain_heartfelt),
+            "sincere"      => (1.0, dp_cfg.devotion_gain_sincere),
+            _              => (0.3, 0.0), // hollow
+        };
+
+        let base           = 8.0f32;
+        let jitter_fun:    f32 = self.rng.gen_range(-3.0_f32..3.0_f32);
+        let jitter_social: f32 = self.rng.gen_range(-2.0_f32..2.0_f32);
+
+        let changes = crate::agent::NeedChanges {
+            fun:     Some((base * mult + jitter_fun).max(0.0)),
+            social:  Some((base * mult * 0.8 + jitter_social).max(0.0)),
+            hygiene: Some(base * 0.5 * mult),
+            energy:  if quality == "transcendent" { Some(10.0) } else { None },
+            ..Default::default()
+        };
+        self.agents[idx].needs.apply(&changes);
+        self.agents[idx].devotion = (self.agents[idx].devotion + dev_gain).clamp(0.0, 100.0);
+    }
+
+    async fn evaluate_admiration(&mut self, admirer_idx: usize, admired_idx: usize, admired_name: &str, day: u32) {
+        let admirer_name = self.agents[admirer_idx].name().to_string();
+        let prompt       = format!(
+            "Did {admirer_name} express sincere admiration toward {admired_name}?\n\
+             (This was a deliberate act of heartfelt admiration.)\n\
+             Reply with JSON only: {{\"score\": 1-5, \"quality\": \"hollow|sincere|heartfelt|transcendent\"}}",
+        );
+        let call_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
+        self.llm_call_counter += 1;
+        let llm = Arc::clone(&self.llm);
+        let raw = llm.generate(&prompt, 64, call_seed, None, None).await.unwrap_or_default();
+        self.log_llm_call("admiration_eval", &admirer_name, &prompt, &raw);
+
+        let quality  = parse_json_quality_field(&raw);
+        let dp_cfg   = self.config.needs.daily_praise.clone();
+        let (mult, dev_gain): (f32, f32) = match quality.as_str() {
+            "transcendent" => (2.5, dp_cfg.devotion_gain_transcendent),
+            "heartfelt"    => (1.5, dp_cfg.devotion_gain_heartfelt),
+            "sincere"      => (1.0, dp_cfg.devotion_gain_sincere),
+            _              => (0.3, 0.0),
+        };
+
+        // Bonus to admirer based on quality
+        let extra_admirer = crate::agent::NeedChanges {
+            fun:    Some(5.0 * mult),
+            social: Some(5.0 * mult),
+            ..Default::default()
+        };
+        self.agents[admirer_idx].needs.apply(&extra_admirer);
+        self.agents[admirer_idx].devotion = (self.agents[admirer_idx].devotion + dev_gain).clamp(0.0, 100.0);
+
+        // Extra bonus to admired for heartfelt/transcendent
+        if matches!(quality.as_str(), "heartfelt" | "transcendent") {
+            let extra_admired = crate::agent::NeedChanges {
+                social: Some(5.0),
+                energy: Some(5.0),
+                ..Default::default()
+            };
+            self.agents[admired_idx].needs.apply(&extra_admired);
+        }
+
+        // Suppress unused variable warning for `day`
+        let _ = day;
+    }
+
+    // -----------------------------------------------------------------------
     // Prompt builders
     // -----------------------------------------------------------------------
 
     fn build_prompt(&self, idx: usize, tick: u32, day: u32, is_night: bool, tod: &str, magic_today: bool) -> String {
+        let god_name = &self.config.world.god_name;
         let agent    = &self.agents[idx];
         let pos      = agent.pos;
         let tile     = self.tile_at(pos);
@@ -1887,6 +2047,11 @@ impl World {
             _ => String::new(),
         };
 
+        let god_block = format!(
+            "\nThis world was shaped by {}, its creator and watchful presence.\nYour devotion to {}: {:.0}/100.\n",
+            god_name, god_name, agent.devotion
+        );
+
         let remembered_past = if !agent.journal_summary.is_empty() {
             format!("REMEMBERED PAST:\n{}\n\n", agent.journal_summary)
         } else {
@@ -1934,8 +2099,7 @@ CURRENT STATE:
 - Fun:      {fun:.0}/100  (100=content, 0=bored)
 - Social:   {social:.0}/100  (100=connected, 0=lonely)
 - Hygiene:  {hygiene:.0}/100  (100=clean, 0=filthy)
-{warnings}
-
+{warnings}{god_block}
 NEARBY: {nearby}{affinity_block}{beliefs_block}{event_note}
 VIEWPORT (you are [X]):
 {viewport}
@@ -1974,6 +2138,7 @@ Choose ONE action. Respond with ONLY a JSON object:
             social           = agent.needs.social,
             hygiene          = agent.needs.hygiene,
             warnings         = warnings_str,
+            god_block        = god_block,
             nearby           = nearby_str,
             affinity_block   = affinity_block,
             beliefs_block    = beliefs_block,
@@ -2008,7 +2173,8 @@ Choose ONE action. Respond with ONLY a JSON object:
                 warn!("Planning LLM error for {}: {}", self.agents[idx].name(), e);
                 String::new()
             });
-        self.run_log.write_llm_debug("planning", self.agents[idx].name(), &prompt, &response);
+        let plan_agent_name = self.agents[idx].name().to_string();
+        self.log_llm_call("planning", &plan_agent_name, &prompt, &response);
         let trimmed = response.trim().to_string();
         if !trimmed.is_empty() {
             debug!(target: "planning", agent = %self.agents[idx].name(), day = day,
@@ -2043,7 +2209,8 @@ Choose ONE action. Respond with ONLY a JSON object:
                 warn!("Reflection LLM error for {}: {}", self.agents[idx].name(), e);
                 String::new()
             });
-        self.run_log.write_llm_debug("reflection", self.agents[idx].name(), &prompt, &response);
+        let reflect_agent_name = self.agents[idx].name().to_string();
+        self.log_llm_call("reflection", &reflect_agent_name, &prompt, &response);
         let trimmed = response.trim().to_string();
         if !trimmed.is_empty() {
             let name      = self.agents[idx].name().to_string();
@@ -2082,7 +2249,8 @@ Choose ONE action. Respond with ONLY a JSON object:
                 warn!("Desires LLM error for {}: {}", self.agents[idx].name(), e);
                 String::new()
             });
-        self.run_log.write_llm_debug("desires", self.agents[idx].name(), &prompt, &response);
+        let desires_agent_name = self.agents[idx].name().to_string();
+        self.log_llm_call("desires", &desires_agent_name, &prompt, &response);
         let trimmed = response.trim().to_string();
         if !trimmed.is_empty() {
             let name      = self.agents[idx].name().to_string();
@@ -2117,7 +2285,8 @@ Choose ONE action. Respond with ONLY a JSON object:
                     warn!("End-of-run desires LLM error for {}: {}", self.agents[idx].name(), e);
                     String::new()
                 });
-            self.run_log.write_llm_debug("end_of_run", self.agents[idx].name(), &prompt, &response);
+            let end_agent_name = self.agents[idx].name().to_string();
+            self.log_llm_call("end_of_run", &end_agent_name, &prompt, &response);
             let trimmed = response.trim().to_string();
             if !trimmed.is_empty() {
                 let name      = self.agents[idx].name().to_string();
@@ -2431,10 +2600,11 @@ Respond ONLY with JSON — no other text:
     // -----------------------------------------------------------------------
 
     fn available_actions(&self, idx: usize) -> Vec<String> {
-        let cfg   = &self.config;
-        let tile  = self.tile_at(self.agents[idx].pos);
-        let pos   = self.agents[idx].pos;
-        let mut v = Vec::new();
+        let cfg      = &self.config;
+        let god_name = &self.config.world.god_name;
+        let tile     = self.tile_at(self.agents[idx].pos);
+        let pos      = self.agents[idx].pos;
+        let mut v    = Vec::new();
 
         if self.tile_allows(tile, "eat") {
             v.push(format!("eat — restore satiety (+{:.0}, always works)",
@@ -2523,10 +2693,10 @@ Respond ONLY with JSON — no other text:
                 nearby_names.join("/")));
         }
 
-        v.push(format!("pray — speak sincerely to the divine (+{:.0} fun +{:.0} social, always works). Your prayer will be heard and kept by the one who made this world. They may answer you.",
+        v.push(format!("pray — speak sincerely to {god_name} (+{:.0} fun +{:.0} social, always works). Your prayer will be heard. {god_name} may answer you at the Temple.",
             cfg.actions.pray.fun_restore.unwrap_or(0.0),
             cfg.actions.pray.social_restore.unwrap_or(0.0)));
-        v.push(format!("praise — offer sincere praise to the creator of this world (+{:.0} fun +{:.0} energy +{:.0} social if sincere, always works). The creator watches with great care. Use the intent field for your words.",
+        v.push(format!("praise — offer sincere praise to {god_name}, creator of this world (+{:.0} fun +{:.0} energy +{:.0} social if sincere, always works). {god_name} watches with great care. Use the intent field for your words.",
             cfg.actions.praise.fun_restore.unwrap_or(0.0),
             cfg.actions.praise.energy_restore.unwrap_or(0.0),
             cfg.actions.praise.social_restore.unwrap_or(0.0)));
@@ -2754,6 +2924,7 @@ Respond ONLY with JSON — no other text:
                 fun:        a.needs.fun,
                 social:     a.needs.social,
                 hygiene:    a.needs.hygiene,
+                devotion:   a.devotion,
                 memories,
                 beliefs,
             }
@@ -3029,6 +3200,24 @@ Respond ONLY with JSON — no other text:
             _        => "nearby",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// JSON quality field parser (for prayer/admiration evaluation)
+// ---------------------------------------------------------------------------
+
+fn parse_json_quality_field(raw: &str) -> String {
+    let try_parse = |s: &str| -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(s.trim()).ok()?;
+        Some(v.get("quality")?.as_str()?.to_lowercase())
+    };
+    if let Some(q) = try_parse(raw) { return q; }
+    if let Some(start) = raw.find('{') {
+        if let Some(end) = raw.rfind('}') {
+            if let Some(q) = try_parse(&raw[start..=end]) { return q; }
+        }
+    }
+    "sincere".to_string()
 }
 
 // ---------------------------------------------------------------------------

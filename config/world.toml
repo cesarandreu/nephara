@@ -132,6 +132,14 @@ journal_summary_max_tokens    = 200
 
 [world]
 resource_respawn_ticks = 20
+god_name               = "César"
+
+[needs.daily_praise]
+penalty                    = 15.0   # Base penalty scaled by inverse devotion
+devotion_decay             = 5.0    # Devotion lost per skipped day
+devotion_gain_sincere      = 5.0
+devotion_gain_heartfelt    = 10.0
+devotion_gain_transcendent = 20.0
 
 [events]
 storm_prob    = 0.005   # ~once per 200 ticks

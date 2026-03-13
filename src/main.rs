@@ -100,10 +100,6 @@ struct Cli {
     #[arg(long)]
     no_tui: bool,
 
-    /// Write full LLM prompts and responses to runs/{id}/llm_debug.md
-    #[arg(long, default_value_t = false)]
-    debug_llm: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -223,8 +219,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         souls.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
 
     // --- Run log ---
-    let mut run_log = RunLog::new(seed)?;
-    run_log.debug_llm = cli.debug_llm;
+    let run_log = RunLog::new(seed)?;
 
     // --- Tracing init (deferred so TUI mode can route to file) ---
     let log_filter = if cli.verbose { "debug" } else { "info" };
@@ -307,6 +302,7 @@ async fn run_tui(
     let souls_owned       = souls_dir.to_string();
     let ticks_per_day     = world.config.time.ticks_per_day;
     let night_start_tick  = world.config.time.night_start_tick;
+    let god_name_owned    = world.config.world.god_name.clone();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<tui_event::TuiEvent>(512);
 
@@ -320,7 +316,7 @@ async fn run_tui(
 
     // Run TUI in a blocking thread (crossterm needs blocking I/O)
     let tui_handle = tokio::task::spawn_blocking(move || {
-        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster);
+        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned);
         app.run(rx)
     });
 

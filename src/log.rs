@@ -34,8 +34,6 @@ pub struct RunLog {
     pub log_path: String,
     /// When true, suppress stdout output (TUI mode — file log still written).
     pub tui_mode: bool,
-    /// When true, write every LLM prompt+response to runs/{id}/llm_debug.md.
-    pub debug_llm: bool,
 }
 
 impl RunLog {
@@ -45,12 +43,11 @@ impl RunLog {
         let dir    = format!("runs/{}", run_id);
         fs::create_dir_all(&dir)?;
         let log_path = format!("{}/tick_log.txt", dir);
-        Ok(RunLog { run_id, log_path, tui_mode: false, debug_llm: false })
+        Ok(RunLog { run_id, log_path, tui_mode: false })
     }
 
-    /// Append a prompt+response pair to runs/{id}/llm_debug.md (no-op if debug_llm is false).
+    /// Append a prompt+response pair to runs/{id}/llm_debug.md (always written).
     pub fn write_llm_debug(&self, call_type: &str, agent: &str, prompt: &str, response: &str) {
-        if !self.debug_llm { return; }
         let path = format!("runs/{}/llm_debug.md", self.run_id);
         let entry = format!(
             "## {} — {}\n### PROMPT\n```\n{}\n```\n### RESPONSE\n```\n{}\n```\n---\n\n",

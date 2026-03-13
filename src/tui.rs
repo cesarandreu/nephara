@@ -20,7 +20,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::color as ccolor;
-use crate::tui_event::{AgentNeedsSnapshot, MapCell, TickEntrySnapshot, TuiEvent};
+use crate::tui_event::{AgentNeedsSnapshot, LlmCallRecord, MapCell, TickEntrySnapshot, TuiEvent};
 
 // ---------------------------------------------------------------------------
 // Log entry types
@@ -84,6 +84,7 @@ pub struct TuiApp {
     seed:                 u64,
     backend_name:         String,
     model_name:           String,
+    god_name:             String,
     scroll_offset:        usize,
     selected:             usize,
     expanded:             HashSet<usize>,
@@ -101,6 +102,13 @@ pub struct TuiApp {
     log_wrap_width:       usize,
     log_inner_area:       Rect,
     log_rendered_scroll:  usize,
+    // LLM debug overlay
+    show_llm_overlay:     bool,
+    llm_calls:            HashMap<u32, Vec<LlmCallRecord>>,
+    llm_overlay_day:      u32,
+    llm_overlay_entry:    usize,
+    llm_overlay_scroll:   usize,
+    llm_overlay_expanded: HashSet<usize>,
 }
 
 impl TuiApp {
@@ -113,37 +121,45 @@ impl TuiApp {
         backend_name:     String,
         model_name:       String,
         roster:           Vec<(String, Color)>,
+        god_name:         String,
     ) -> Self {
         TuiApp {
-            map_cells:           vec![vec![], vec![]],
-            tick_maps:           HashMap::new(),
-            displayed_tick:      0,
-            log_entries:         Vec::new(),
-            agent_needs:         Vec::new(),
+            map_cells:            vec![vec![], vec![]],
+            tick_maps:            HashMap::new(),
+            displayed_tick:       0,
+            log_entries:          Vec::new(),
+            agent_needs:          Vec::new(),
             agent_count,
-            tick:                0,
-            day:                 1,
-            time_of_day:         "Dawn",
+            tick:                 0,
+            day:                  1,
+            time_of_day:          "Dawn",
             total_ticks,
             ticks_per_day,
             night_start_tick,
             seed,
             backend_name,
             model_name,
-            scroll_offset:       0,
-            selected:            0,
-            expanded:            HashSet::new(),
-            is_complete:         false,
-            should_quit:         false,
+            god_name,
+            scroll_offset:        0,
+            selected:             0,
+            expanded:             HashSet::new(),
+            is_complete:          false,
+            should_quit:          false,
             roster,
-            show_legend:         false,
-            show_help:           false,
-            inspected_agent:     None,
-            scroll_locked:       false,
-            thinking_entry_idx:  HashMap::new(),
-            log_wrap_width:      60,
-            log_inner_area:      Rect::default(),
-            log_rendered_scroll: 0,
+            show_legend:          false,
+            show_help:            false,
+            inspected_agent:      None,
+            scroll_locked:        false,
+            thinking_entry_idx:   HashMap::new(),
+            log_wrap_width:       60,
+            log_inner_area:       Rect::default(),
+            log_rendered_scroll:  0,
+            show_llm_overlay:     false,
+            llm_calls:            HashMap::new(),
+            llm_overlay_day:      1,
+            llm_overlay_entry:    0,
+            llm_overlay_scroll:   0,
+            llm_overlay_expanded: HashSet::new(),
         }
     }
 
@@ -237,6 +253,10 @@ impl TuiApp {
                     notable: vec![format!("ERROR: {}", msg)],
                 });
                 self.is_complete = true;
+            }
+            TuiEvent::LlmCall(record) => {
+                let day = record.day;
+                self.llm_calls.entry(day).or_insert_with(Vec::new).push(record);
             }
         }
     }
@@ -334,8 +354,63 @@ impl TuiApp {
     }
 
     fn handle_input(&mut self, key: crossterm::event::KeyEvent) {
+        // LLM overlay mode intercepts most keys
+        if self.show_llm_overlay {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Char('d')) | (_, KeyCode::Esc) => {
+                    self.show_llm_overlay = false;
+                }
+                (_, KeyCode::Char('<')) | (_, KeyCode::Left) => {
+                    if self.llm_overlay_day > 1 {
+                        self.llm_overlay_day -= 1;
+                        self.llm_overlay_entry = 0;
+                        self.llm_overlay_scroll = 0;
+                    }
+                }
+                (_, KeyCode::Char('>')) | (_, KeyCode::Right) => {
+                    self.llm_overlay_day = self.llm_overlay_day.saturating_add(1);
+                    self.llm_overlay_entry = 0;
+                    self.llm_overlay_scroll = 0;
+                }
+                (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                    self.llm_overlay_scroll = self.llm_overlay_scroll.saturating_add(1);
+                }
+                (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                    self.llm_overlay_scroll = self.llm_overlay_scroll.saturating_sub(1);
+                }
+                (_, KeyCode::Tab) | (_, KeyCode::BackTab) => {
+                    let max = self.llm_calls.get(&self.llm_overlay_day).map(|v| v.len()).unwrap_or(0);
+                    if max > 0 {
+                        if matches!(key.code, KeyCode::Tab) {
+                            self.llm_overlay_entry = (self.llm_overlay_entry + 1) % max;
+                        } else if self.llm_overlay_entry == 0 {
+                            self.llm_overlay_entry = max - 1;
+                        } else {
+                            self.llm_overlay_entry -= 1;
+                        }
+                        self.llm_overlay_scroll = 0;
+                    }
+                }
+                (_, KeyCode::Char(' ')) | (_, KeyCode::Enter) => {
+                    if self.llm_overlay_expanded.contains(&self.llm_overlay_entry) {
+                        self.llm_overlay_expanded.remove(&self.llm_overlay_entry);
+                    } else {
+                        self.llm_overlay_expanded.insert(self.llm_overlay_entry);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match (key.modifiers, key.code) {
             (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => { self.should_quit = true; }
+            (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                self.show_llm_overlay = true;
+                self.llm_overlay_day = self.day;
+                self.llm_overlay_entry = 0;
+                self.llm_overlay_scroll = 0;
+            }
             (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
                 self.scroll_locked = true;
                 self.scroll_offset = self.scroll_offset.saturating_add(1);
@@ -468,9 +543,10 @@ impl TuiApp {
         let tick_filled = ((self.tick as f32 / self.total_ticks as f32) * 10.0).round() as usize;
         let tick_bar = format!("[{}{}]", "█".repeat(tick_filled.min(10)), "░".repeat(10 - tick_filled.min(10)));
         let title_text = format!(
-            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}",
+            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}  ✦ {}",
             self.model_name, self.seed, self.tick, self.total_ticks, tick_bar,
-            self.day, day_bar, self.backend_name, status, lock_indicator
+            self.day, day_bar, self.backend_name, status, lock_indicator,
+            self.god_name
         );
         let title = Paragraph::new(title_text)
             .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
@@ -486,7 +562,11 @@ impl TuiApp {
             .split(outer[1]);
 
         self.render_map(f, main[0]);
-        self.render_log(f, main[1]);
+        if self.show_llm_overlay {
+            self.render_llm_overlay(f, main[1]);
+        } else {
+            self.render_log(f, main[1]);
+        }
         self.render_needs(f, outer[2]);
 
         // Overlays (rendered on top)
@@ -628,11 +708,11 @@ impl TuiApp {
 
         let header = Line::from(vec![
             Span::raw(format!("{:<12}", "Agent")),
-            Span::styled(format!("{:>9}", "Satiety"), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>9}", "Energy"),  Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>9}", "Fun"),      Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>9}", "Social"),   Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>9}", "Hygiene"),  Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:^9}", "Satiety"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:^9}", "Energy"),  Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:^9}", "Fun"),      Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:^9}", "Social"),   Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:^9}", "Hygiene"),  Style::default().fg(Color::DarkGray)),
         ]);
 
         const CRIT:   f32 = 20.0;
@@ -677,7 +757,7 @@ impl TuiApp {
 
     fn render_help_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let popup_width  = 50u16;
-        let popup_height = 12u16;
+        let popup_height = 13u16;
         let x = area.x + area.width.saturating_sub(popup_width) / 2;
         let y = area.y + area.height.saturating_sub(popup_height) / 2;
         let popup_area = Rect {
@@ -724,6 +804,10 @@ impl TuiApp {
                 Span::styled("  ?", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
                 Span::raw("           This help overlay"),
             ]),
+            Line::from(vec![
+                Span::styled("  d", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("           LLM debug log"),
+            ]),
         ];
 
         let para = Paragraph::new(lines).block(block);
@@ -765,6 +849,17 @@ impl TuiApp {
             ]));
         }
 
+        // Devotion
+        let dev_filled = ((snap.devotion / 100.0 * 5.0).round() as usize).min(5);
+        let dev_bar = format!("{}{}", "█".repeat(dev_filled), "░".repeat(5 - dev_filled));
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {:<9}", "Devotion")),
+            Span::styled(
+                format!("{} {:>3.0}", dev_bar, snap.devotion),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]));
+
         // Memories
         if !snap.memories.is_empty() {
             lines.push(Line::raw(""));
@@ -803,6 +898,75 @@ impl TuiApp {
         let para = Paragraph::new(lines).block(block);
         f.render_widget(ratatui::widgets::Clear, panel_area);
         f.render_widget(para, panel_area);
+    }
+
+    fn render_llm_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let block = Block::default()
+            .title(format!(
+                " LLM DEBUG — Day {}  [< > day  Tab entry  j/k scroll  Space expand  d/Esc close] ",
+                self.llm_overlay_day
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightCyan));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let width = inner.width as usize;
+        let empty: Vec<LlmCallRecord> = Vec::new();
+        let calls = self.llm_calls.get(&self.llm_overlay_day).unwrap_or(&empty);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        if calls.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  No LLM calls recorded for Day {}.", self.llm_overlay_day),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for (i, call) in calls.iter().enumerate() {
+                let is_selected = i == self.llm_overlay_entry;
+                let is_expanded = self.llm_overlay_expanded.contains(&i);
+                let prefix = if is_selected { "▶ " } else { "  " };
+                let expand_icon = if is_expanded { "▼" } else { "▶" };
+                let header_style = if is_selected {
+                    Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{}[{}] {}  {}", prefix, call.call_type, call.agent_name, expand_icon),
+                    header_style,
+                )));
+                if is_expanded {
+                    lines.push(Line::from(Span::styled(
+                        "  PROMPT:".to_string(),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                    )));
+                    for line in wrap_text(&call.prompt, width.saturating_sub(4)) {
+                        lines.push(Line::from(Span::styled(
+                            format!("    {}", line),
+                            Style::default().fg(Color::Gray),
+                        )));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "  RESPONSE:".to_string(),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                    )));
+                    for line in wrap_text(&call.response, width.saturating_sub(4)) {
+                        lines.push(Line::from(Span::styled(
+                            format!("    {}", line),
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                }
+            }
+        }
+
+        let total  = lines.len();
+        let height = inner.height as usize;
+        let scroll = self.llm_overlay_scroll.min(total.saturating_sub(height));
+        let para = Paragraph::new(lines).scroll((scroll as u16, 0));
+        f.render_widget(para, inner);
     }
 
     // -----------------------------------------------------------------------

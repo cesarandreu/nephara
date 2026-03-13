@@ -104,6 +104,11 @@ pub async fn run_simulation(
         let needs = world.agent_needs_snapshots();
         let _ = tx.send(TuiEvent::NeedsUpdate(needs)).await;
 
+        // Send LLM call records for the debug overlay
+        for record in result.llm_calls {
+            let _ = tx.send(TuiEvent::LlmCall(record)).await;
+        }
+
         // Send per-agent actions
         for entry in &result.entries {
             let prayer_text = if entry.action_line.starts_with("Pray:") {
