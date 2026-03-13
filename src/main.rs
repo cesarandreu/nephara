@@ -286,10 +286,12 @@ async fn run_tui(
         ))
         .collect();
 
-    let agent_count   = world.agents.len();
-    let backend_owned = backend_name.to_string();
-    let model_owned   = world.config.llm.model.clone();
-    let souls_owned   = souls_dir.to_string();
+    let agent_count       = world.agents.len();
+    let backend_owned     = backend_name.to_string();
+    let model_owned       = world.config.llm.model.clone();
+    let souls_owned       = souls_dir.to_string();
+    let ticks_per_day     = world.config.time.ticks_per_day;
+    let night_start_tick  = world.config.time.night_start_tick;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<tui_event::TuiEvent>(512);
 
@@ -303,7 +305,7 @@ async fn run_tui(
 
     // Run TUI in a blocking thread (crossterm needs blocking I/O)
     let tui_handle = tokio::task::spawn_blocking(move || {
-        let mut app = tui::TuiApp::new(agent_count, total_ticks, seed, backend_owned, model_owned, roster);
+        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster);
         app.run(rx)
     });
 

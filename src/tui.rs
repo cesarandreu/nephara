@@ -79,6 +79,8 @@ pub struct TuiApp {
     day:                  u32,
     time_of_day:          &'static str,
     total_ticks:          u32,
+    ticks_per_day:        u32,
+    night_start_tick:     u32,
     seed:                 u64,
     backend_name:         String,
     model_name:           String,
@@ -101,12 +103,14 @@ pub struct TuiApp {
 
 impl TuiApp {
     pub fn new(
-        agent_count:  usize,
-        total_ticks:  u32,
-        seed:         u64,
-        backend_name: String,
-        model_name:   String,
-        roster:       Vec<(String, Color)>,
+        agent_count:      usize,
+        total_ticks:      u32,
+        ticks_per_day:    u32,
+        night_start_tick: u32,
+        seed:             u64,
+        backend_name:     String,
+        model_name:       String,
+        roster:           Vec<(String, Color)>,
     ) -> Self {
         TuiApp {
             map_cells:           vec![vec![], vec![]],
@@ -119,6 +123,8 @@ impl TuiApp {
             day:                 1,
             time_of_day:         "Dawn",
             total_ticks,
+            ticks_per_day,
+            night_start_tick,
             seed,
             backend_name,
             model_name,
@@ -438,10 +444,18 @@ impl TuiApp {
         // Title bar
         let status = if self.is_complete { "DONE" } else { "RUNNING" };
         let lock_indicator = if self.scroll_locked { "  [SCROLL LOCK — G to resume]" } else { "" };
+        let tick_in_day = self.tick % self.ticks_per_day;
+        let day_icon = if tick_in_day >= self.night_start_tick { "☾" } else { "☀" };
+        let day_filled = ((tick_in_day as f32 / self.ticks_per_day as f32) * 8.0).round() as usize;
+        let day_bar = format!("{}[{}{}] {}/{}", day_icon,
+            "█".repeat(day_filled.min(8)), "░".repeat(8 - day_filled.min(8)),
+            tick_in_day, self.ticks_per_day);
+        let tick_filled = ((self.tick as f32 / self.total_ticks as f32) * 10.0).round() as usize;
+        let tick_bar = format!("[{}{}]", "█".repeat(tick_filled.min(10)), "░".repeat(10 - tick_filled.min(10)));
         let title_text = format!(
-            " NEPHARA  model:{}  seed:{}  tick:{}/{}  Day {}  {}  [{}]  {}{}",
-            self.model_name, self.seed, self.tick, self.total_ticks,
-            self.day, self.time_of_day, self.backend_name, status, lock_indicator
+            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}",
+            self.model_name, self.seed, self.tick, self.total_ticks, tick_bar,
+            self.day, day_bar, self.backend_name, status, lock_indicator
         );
         let title = Paragraph::new(title_text)
             .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
@@ -515,14 +529,14 @@ impl TuiApp {
             )));
             let tile_legend: &[(&str, Color, &str)] = &[
                 (".", Color::DarkGray,     "Open"),
-                ("F", Color::Green,        "Forest"),
+                ("♣", Color::Green,        "Forest"),
                 ("~", Color::Blue,         "River"),
                 ("S", Color::Yellow,       "Square"),
-                ("V", Color::LightYellow,  "Tavern"),
+                ("⌂", Color::LightYellow,  "Tavern"),
                 ("W", Color::Cyan,         "Well"),
                 ("M", Color::LightGreen,   "Meadow"),
                 ("h", Color::Magenta,      "Home"),
-                ("P", Color::LightMagenta, "Temple"),
+                ("†", Color::LightMagenta, "Temple"),
             ];
             for (ch, color, label) in tile_legend {
                 lines.push(Line::from(vec![
@@ -591,12 +605,15 @@ impl TuiApp {
 
         let header = Line::from(vec![
             Span::raw(format!("{:<12}", "Agent")),
-            Span::styled(format!("{:>8}", "Satiety"), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>8}", "Energy"),  Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>8}", "Fun"),      Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>8}", "Social"),   Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:>8}", "Hygiene"),  Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>9}", "Satiety"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>9}", "Energy"),  Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>9}", "Fun"),      Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>9}", "Social"),   Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>9}", "Hygiene"),  Style::default().fg(Color::DarkGray)),
         ]);
+
+        const CRIT:   f32 = 20.0;
+        const SEVERE: f32 = 10.0;
 
         let mut lines = vec![header];
         for snap in &self.agent_needs {
@@ -605,15 +622,30 @@ impl TuiApp {
                 .map(|(_, c)| *c)
                 .unwrap_or(Color::White);
 
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:<12}", snap.agent_name),
-                    Style::default().fg(name_color)),
-                need_span(snap.hunger,  8),
-                need_span(snap.energy,  8),
-                need_span(snap.fun,     8),
-                need_span(snap.social,  8),
-                need_span(snap.hygiene, 8),
-            ]));
+            let needs_arr = [snap.hunger, snap.energy, snap.fun, snap.social, snap.hygiene];
+            let has_severe = needs_arr.iter().any(|&n| n < SEVERE);
+            let has_crit   = needs_arr.iter().any(|&n| n < CRIT);
+
+            let name_style = if has_severe {
+                Style::default().fg(name_color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(name_color)
+            };
+
+            let mut spans = vec![
+                Span::styled(format!("{:<12}", snap.agent_name), name_style),
+                need_span(snap.hunger),
+                need_span(snap.energy),
+                need_span(snap.fun),
+                need_span(snap.social),
+                need_span(snap.hygiene),
+            ];
+            if has_severe {
+                spans.push(Span::styled(" ⚠", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+            } else if has_crit {
+                spans.push(Span::styled(" ⚠", Style::default().fg(Color::Yellow)));
+            }
+            lines.push(Line::from(spans));
         }
 
         let para = Paragraph::new(lines);
@@ -917,10 +949,12 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn need_span(v: f32, width: usize) -> Span<'static> {
+fn need_span(v: f32) -> Span<'static> {
     let color = ccolor::to_ratatui_color(ccolor::needs_color(v));
+    let filled = ((v / 100.0 * 5.0).round() as usize).min(5);
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(5 - filled));
     Span::styled(
-        format!("{:>width$.0}", v, width = width),
+        format!("{} {:>3.0}", bar, v),
         Style::default().fg(color),
     )
 }

@@ -60,14 +60,14 @@ pub enum TileType {
 fn tile_char(tile: TileType) -> char {
     match tile {
         TileType::Open    => '.',
-        TileType::Forest  => 'F',
+        TileType::Forest  => '♣',
         TileType::River   => '~',
         TileType::Square  => 'S',
-        TileType::Tavern  => 'V',
+        TileType::Tavern  => '⌂',
         TileType::Well    => 'W',
         TileType::Meadow  => 'M',
         TileType::Home(_) => 'h',
-        TileType::Temple  => 'P',
+        TileType::Temple  => '†',
     }
 }
 
