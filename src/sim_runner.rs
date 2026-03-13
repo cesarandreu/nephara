@@ -51,6 +51,10 @@ pub async fn run_simulation(
         .collect();
     let run_start = Instant::now();
 
+    // Send initial map and needs so TUI is populated before the first tick completes
+    let _ = tx.send(TuiEvent::MapUpdate(world.render_map_cells())).await;
+    let _ = tx.send(TuiEvent::NeedsUpdate(world.agent_needs_snapshots())).await;
+
     for _t in 0..total_ticks {
         let tick_num = world.tick_num;
         let tpd      = world.config.time.ticks_per_day;

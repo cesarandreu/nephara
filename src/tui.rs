@@ -968,7 +968,11 @@ impl TuiApp {
                             Style::default().fg(Color::DarkGray),
                         ),
                         Span::styled(
-                            format!(" {}", &tokens[tokens.len().saturating_sub(40)..]),
+                            {
+                                let start = tokens.len().saturating_sub(40);
+                                let start = (start..=tokens.len()).find(|&i| tokens.is_char_boundary(i)).unwrap_or(tokens.len());
+                                format!(" {}", &tokens[start..])
+                            },
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]));

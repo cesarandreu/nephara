@@ -228,18 +228,33 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Tracing init (deferred so TUI mode can route to file) ---
     let log_filter = if cli.verbose { "debug" } else { "info" };
+    let trace_path = format!("runs/{}/trace.log", run_log.run_id);
     if cli.no_tui {
-        tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_filter)))
-            .with_target(true)
-            .with_writer(std::io::stderr)
-            .init();
+        if let Ok(file) = std::fs::File::create(&trace_path) {
+            use tracing_subscriber::prelude::*;
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_writer(std::sync::Mutex::new(file));
+            let stderr_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_writer(std::io::stderr);
+            let _ = tracing_subscriber::registry()
+                .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_filter)))
+                .with(file_layer)
+                .with(stderr_layer)
+                .try_init();
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_filter)))
+                .with_target(true)
+                .with_writer(std::io::stderr)
+                .init();
+        }
     } else {
-        let trace_path = format!("runs/{}/trace.log", run_log.run_id);
         if let Ok(file) = std::fs::File::create(&trace_path) {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(EnvFilter::new(log_filter))
-                .with_writer(move || file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap()))
+                .with_writer(std::sync::Mutex::new(file))
                 .try_init();
         }
     }

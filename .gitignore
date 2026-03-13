@@ -4,6 +4,8 @@ world-sim-mvp-spec.md
 .claude/
 flake.lock
 
+models/
+
 # Soul runtime files — generated per-run; personal data, not for forked repos
 souls/*.journal.md
 souls/*.story.md

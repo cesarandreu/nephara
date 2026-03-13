@@ -1953,7 +1953,7 @@ Speak your desire and it will manifest — though words carry all their meanings
 Avoid repeating the same action twice in a row. Your personality should guide what you do.
 
 Choose ONE action. Respond with ONLY a JSON object:
-{{"action": "action_name", "target": "optional_target_name", "intent": "if casting, your spoken desire or gossip rumor content", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
+{{"action": "action_name", "target": "agent name (required for gossip/chat/teach/admire)", "intent": "if casting, your spoken desire or gossip rumor content", "reason": "brief reason", "description": "in your own words — what are you doing and why does it matter to you"}}"#,
             name             = agent.identity.name,
             personality      = agent.identity.personality,
             backstory        = agent.identity.backstory,

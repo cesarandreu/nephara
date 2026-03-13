@@ -24,9 +24,7 @@
             rustToolchain
             pkg-config
             openssl
-            # Ollama: GPU selection (ROCm/CPU) is handled at runtime by Ollama itself.
-            # If ROCm doesn't cooperate on your machine, Ollama will fall back to CPU.
-            ollama
+            python3Packages.huggingface-hub
           ];
 
           env = {
@@ -36,8 +34,7 @@
 
           shellHook = ''
             echo "=== Nephara Dev Shell ==="
-            echo "  Start Ollama:  ollama serve"
-            echo "  Pull model:    ollama pull gemma3:4b"
+            echo "  Fetch model:   huggingface-cli download <repo> <file> --local-dir models/"
             echo "  Mock run:      cargo run -- --llm mock"
             echo "  Live run:      cargo run"
             echo "  Seeded run:    cargo run -- --seed 42"
