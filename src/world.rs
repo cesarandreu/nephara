@@ -191,13 +191,20 @@ fn build_resource_nodes(n_agents: usize) -> Vec<ResourceNode> {
 // Helper: visible state label for nearby agents
 // ---------------------------------------------------------------------------
 
-fn agent_visible_state(a: &Agent, config: &Config) -> Option<&'static str> {
+fn agent_visible_state(a: &Agent, config: &Config) -> Option<String> {
     let t = &config.needs.thresholds;
-    if a.is_busy()                       { return Some("busy"); }
-    if a.needs.energy < t.penalty_severe { return Some("exhausted"); }
-    if a.needs.hunger < t.penalty_severe { return Some("hungry"); }
-    if a.needs.fun    < t.penalty_severe { return Some("withdrawn"); }
-    if a.needs.social < t.penalty_severe { return Some("lonely"); }
+    if a.is_busy() {
+        let label = if a.current_action_display.is_empty() {
+            "busy".to_string()
+        } else {
+            a.current_action_display.to_lowercase()
+        };
+        return Some(label);
+    }
+    if a.needs.energy < t.penalty_severe { return Some("exhausted".to_string()); }
+    if a.needs.hunger < t.penalty_severe { return Some("hungry".to_string()); }
+    if a.needs.fun    < t.penalty_severe { return Some("withdrawn".to_string()); }
+    if a.needs.social < t.penalty_severe { return Some("lonely".to_string()); }
     None
 }
 
@@ -2685,6 +2692,20 @@ Respond ONLY with JSON — no other text:
             if let Ok(cr) = serde_json::from_str::<ChatResponse>(&json) {
                 let gossip = extract_gossip(&cr);
                 return (cr.summary, cr.exchange.filter(|e| !e.is_empty()), gossip);
+            }
+        }
+        // Fallback: search for a "summary" key in prose-wrapped JSON.
+        if let Some(start) = raw.find("\"summary\"") {
+            let after_key = raw[start + 9..].trim_start();
+            let after_key = after_key.trim_start_matches(':').trim_start();
+            if after_key.starts_with('"') {
+                let inner = &after_key[1..];
+                if let Some(end) = inner.find('"') {
+                    let extracted = inner[..end].to_string();
+                    if !extracted.is_empty() {
+                        return (extracted, None, None);
+                    }
+                }
             }
         }
         (raw.trim().to_string(), None, None)

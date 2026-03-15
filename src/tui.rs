@@ -576,6 +576,9 @@ impl TuiApp {
         if let Some(agent_idx) = self.inspected_agent {
             self.render_inspect_panel(f, main[1], agent_idx);
         }
+        if self.show_legend {
+            self.render_legend_overlay(f, main[0]);
+        }
     }
 
     fn render_map(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
@@ -622,49 +625,6 @@ impl TuiApp {
                     snap.hunger, snap.energy, snap.fun)));
             }
             lines.push(Line::from(spans));
-        }
-
-        if self.show_legend {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
-                "TILES",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-            )));
-            let tile_legend: &[(&str, Color, &str)] = &[
-                (".", Color::DarkGray,     "Open"),
-                ("♣", Color::Green,        "Forest"),
-                ("~", Color::Blue,         "River"),
-                ("S", Color::Yellow,       "Square"),
-                ("⌂", Color::LightYellow,  "Tavern"),
-                ("W", Color::Cyan,         "Well"),
-                ("M", Color::LightGreen,   "Meadow"),
-                ("h", Color::Magenta,      "Home"),
-                ("†", Color::LightMagenta, "Temple"),
-            ];
-            for (ch, color, label) in tile_legend {
-                lines.push(Line::from(vec![
-                    Span::styled((*ch).to_string(), Style::default().fg(*color)),
-                    Span::raw(format!(" {}", label)),
-                ]));
-            }
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
-                "RESOURCES",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-            )));
-            let res_legend: &[(&str, Color, &str)] = &[
-                ("✿", Color::LightMagenta, "Berries"),
-                ("≋", Color::LightCyan,    "Fish"),
-                ("✦", Color::LightRed,     "Campfire"),
-                ("✜", Color::LightGreen,   "Herbs"),
-                ("·", Color::DarkGray,     "Depleted"),
-            ];
-            for (ch, color, label) in res_legend {
-                lines.push(Line::from(vec![
-                    Span::styled((*ch).to_string(), Style::default().fg(*color)),
-                    Span::raw(format!(" {}", label)),
-                ]));
-            }
         }
 
         let para = Paragraph::new(lines);
@@ -900,6 +860,70 @@ impl TuiApp {
         f.render_widget(para, panel_area);
     }
 
+    fn render_legend_overlay(&self, f: &mut ratatui::Frame, map_area: ratatui::layout::Rect) {
+        // 2 border + 1 TILES + 9 tiles + 1 blank + 1 RESOURCES + 5 resources = 19 rows
+        let popup_width:  u16 = 22;
+        let popup_height: u16 = 19;
+        let x = map_area.x + 1;
+        let y = map_area.y + map_area.height.saturating_sub(popup_height + 1);
+        let popup_area = Rect {
+            x,
+            y,
+            width:  popup_width.min(map_area.width.saturating_sub(2)),
+            height: popup_height.min(map_area.height.saturating_sub(2)),
+        };
+
+        let block = Block::default()
+            .title(" LEGEND ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "TILES",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        )));
+        let tile_legend: &[(&str, Color, &str)] = &[
+            (".", Color::DarkGray,     "Open"),
+            ("♣", Color::Green,        "Forest"),
+            ("~", Color::Blue,         "River"),
+            ("S", Color::Yellow,       "Square"),
+            ("⌂", Color::LightYellow,  "Tavern"),
+            ("W", Color::Cyan,         "Well"),
+            ("M", Color::LightGreen,   "Meadow"),
+            ("h", Color::Magenta,      "Home"),
+            ("†", Color::LightMagenta, "Temple"),
+        ];
+        for (ch, color, label) in tile_legend {
+            lines.push(Line::from(vec![
+                Span::styled((*ch).to_string(), Style::default().fg(*color)),
+                Span::raw(format!(" {}", label)),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "RESOURCES",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        )));
+        let res_legend: &[(&str, Color, &str)] = &[
+            ("✿", Color::LightMagenta, "Berries"),
+            ("≋", Color::LightCyan,    "Fish"),
+            ("✦", Color::LightRed,     "Campfire"),
+            ("✜", Color::LightGreen,   "Herbs"),
+            ("·", Color::DarkGray,     "Depleted"),
+        ];
+        for (ch, color, label) in res_legend {
+            lines.push(Line::from(vec![
+                Span::styled((*ch).to_string(), Style::default().fg(*color)),
+                Span::raw(format!(" {}", label)),
+            ]));
+        }
+
+        let para = Paragraph::new(lines).block(block);
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+        f.render_widget(para, popup_area);
+    }
+
     fn render_llm_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let block = Block::default()
             .title(format!(
@@ -1009,6 +1033,26 @@ impl TuiApp {
                     };
 
                     let pos_str = format!("({},{})", snap.agent_pos.0, snap.agent_pos.1);
+
+                    // Build action spans: color action name distinctly, details in DarkGray.
+                    let action_spans: Vec<Span<'static>> = if snap.is_busy {
+                        if let Some(p) = snap.action_line.find(" (") {
+                            vec![
+                                Span::styled(snap.action_line[..p].to_string(), Style::default().fg(Color::Yellow)),
+                                Span::styled(snap.action_line[p..].to_string(), Style::default().fg(Color::DarkGray)),
+                            ]
+                        } else {
+                            vec![Span::styled(snap.action_line.clone(), Style::default().fg(Color::Yellow))]
+                        }
+                    } else if let Some(sep) = snap.action_line.find(" | ") {
+                        vec![
+                            Span::styled(snap.action_line[..sep].to_string(), Style::default().fg(Color::LightCyan)),
+                            Span::styled(snap.action_line[sep..].to_string(), Style::default().fg(Color::DarkGray)),
+                        ]
+                    } else {
+                        vec![Span::styled(snap.action_line.clone(), Style::default().fg(Color::LightCyan))]
+                    };
+
                     let mut header_spans = vec![
                         Span::styled(
                             format!("[{:<10}]", snap.agent_name),
@@ -1020,12 +1064,8 @@ impl TuiApp {
                             Style::default().fg(loc_color),
                         ),
                         Span::raw(format!(" {} │ ", pos_str)),
-                        if snap.is_busy {
-                            Span::styled(snap.action_line.clone(), Style::default().fg(Color::Yellow))
-                        } else {
-                            Span::raw(snap.action_line.clone())
-                        },
                     ];
+                    header_spans.extend(action_spans);
 
                     if let Some(ref tier) = snap.outcome_tier_label {
                         header_spans.push(Span::raw(" │ "));
