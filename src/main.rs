@@ -12,6 +12,7 @@ mod tui;
 mod tui_event;
 mod world;
 
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -132,6 +133,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Config ---
     let mut cfg = config::load(&cli.config)?;
+    for warning in config::validate(&cfg) {
+        warn!("Config warning: {}", warning);
+    }
     if let Some(url) = &cli.llm_url {
         cfg.llm.ollama_url   = url.clone();
         cfg.llm.llamacpp_url = url.clone();
@@ -270,7 +274,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if cli.no_tui {
         run_streaming(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg).await
     } else {
-        run_tui(world, total_ticks, seed, &cli.llm, &cli.souls).await
+        run_tui(world, total_ticks, seed, &cli.llm, &cli.souls, &cfg).await
     }
 }
 
@@ -284,6 +288,7 @@ async fn run_tui(
     seed:         u64,
     backend_name: &str,
     souls_dir:    &str,
+    cfg:          &config::Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Suppress stdout from run_log in TUI mode
     world.run_log.tui_mode = true;
@@ -304,6 +309,10 @@ async fn run_tui(
     let night_start_tick  = world.config.time.night_start_tick;
     let god_name_owned    = world.config.world.god_name.clone();
 
+    // A1: pause/resume + tick speed atomics
+    let paused       = Arc::new(AtomicBool::new(false));
+    let tick_delay   = Arc::new(AtomicU64::new(cfg.simulation.tick_delay_ms));
+
     let (tx, rx) = tokio::sync::mpsc::channel::<tui_event::TuiEvent>(512);
 
     // Wire up TUI streaming (FEAT-13)
@@ -312,11 +321,12 @@ async fn run_tui(
     // Spawn simulation
     let sim_handle = tokio::spawn(sim_runner::run_simulation(
         tx, world, total_ticks, seed, backend_owned.clone(), souls_owned,
+        Arc::clone(&paused), Arc::clone(&tick_delay),
     ));
 
     // Run TUI in a blocking thread (crossterm needs blocking I/O)
     let tui_handle = tokio::task::spawn_blocking(move || {
-        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned);
+        let mut app = tui::TuiApp::new(agent_count, total_ticks, ticks_per_day, night_start_tick, seed, backend_owned, model_owned, roster, god_name_owned, paused, tick_delay);
         app.run(rx)
     });
 

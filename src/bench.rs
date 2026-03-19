@@ -37,6 +37,9 @@ pub struct PromptResult {
     pub parse_success:  usize,
     pub parse_rate:     f64,
     pub avg_latency_ms: f64,
+    pub min_latency_ms: f64,
+    pub max_latency_ms: f64,
+    pub p95_latency_ms: f64,
     pub avg_chars:      f64,
 }
 
@@ -106,8 +109,9 @@ pub async fn run_bench(
 
         for pr in &[&action_res, &narrator_res, &interp_res, &plan_res] {
             println!(
-                "  {:<12}  parse: {:>3.0}%  lat: {:>6.0}ms  chars: {:>5.0}",
-                pr.name, pr.parse_rate * 100.0, pr.avg_latency_ms, pr.avg_chars,
+                "  {:<12}  parse: {:>3.0}%  avg: {:>6.0}ms  min: {:>6.0}ms  max: {:>6.0}ms  p95: {:>6.0}ms  chars: {:>5.0}",
+                pr.name, pr.parse_rate * 100.0, pr.avg_latency_ms,
+                pr.min_latency_ms, pr.max_latency_ms, pr.p95_latency_ms, pr.avg_chars,
             );
         }
         println!();
@@ -145,6 +149,7 @@ async fn bench_prompt_type(
     let mut total_ms    = 0.0f64;
     let mut total_chars = 0.0f64;
     let mut parse_ok    = 0usize;
+    let mut latencies:  Vec<f64> = Vec::new();
 
     print!("  {:<12} ", name);
     let _ = std::io::stdout().flush();
@@ -154,6 +159,7 @@ async fn bench_prompt_type(
         let result = backend.generate(prompt, max_tokens, None, schema, None).await;
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
         total_ms += elapsed;
+        latencies.push(elapsed);
 
         match result {
             Ok(text) => {
@@ -172,12 +178,22 @@ async fn bench_prompt_type(
     println!();
 
     let n = samples.max(1) as f64;
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min_latency_ms = latencies.first().copied().unwrap_or(0.0);
+    let max_latency_ms = latencies.last().copied().unwrap_or(0.0);
+    let p95_idx = (latencies.len() as f64 * 0.95).ceil() as usize;
+    let p95_latency_ms = latencies.get(p95_idx.saturating_sub(1).min(latencies.len().saturating_sub(1)))
+        .copied().unwrap_or(0.0);
+
     PromptResult {
         name:           name.to_string(),
         samples,
         parse_success:  parse_ok,
         parse_rate:     parse_ok as f64 / n,
         avg_latency_ms: total_ms   / n,
+        min_latency_ms,
+        max_latency_ms,
+        p95_latency_ms,
         avg_chars:      total_chars / n,
     }
 }

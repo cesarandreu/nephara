@@ -1040,6 +1040,14 @@ impl World {
                 let mem_learner = format!("Tick {tick} | Day {day} | {tod} | Was taught by {teacher_name}: \"{lesson}\"");
                 self.agents[tidx].push_memory(mem_learner, buf);
 
+                // B7: grant XP to learner for the lesson
+                if let Some(new_score) = self.agents[tidx].grant_xp("wit") {
+                    let level_ev = format!("Day {day}: {} leveled up Wit to {} (taught by {})!",
+                        target_name, new_score, teacher_name);
+                    self.notable_events.push((tidx, level_ev.clone()));
+                    tracing::info!("{}", level_ev);
+                }
+
                 let snippet = &lesson[..lesson.len().min(60)];
                 Ok(TickEntry {
                     agent_id:           idx,
@@ -1066,13 +1074,46 @@ impl World {
                 let mem = format!("Tick {tick} | Day {day} | {tod} | Fell asleep");
                 let buf = self.config.memory.buffer_size;
                 self.agents[idx].push_memory(mem, buf);
+
+                // B5: 20% dream chance on sleep start
+                let dream_outcome = if !self.is_test_run && self.rng.gen_bool(0.2) {
+                    let name_str = self.agents[idx].name().to_string();
+                    let personality = self.agents[idx].identity.personality.clone();
+                    let last_mem = self.agents[idx].memory.iter().nth(1).cloned().unwrap_or_default();
+                    let dream_prompt = format!(
+                        "{} has fallen asleep in {}.\nPersonality: {}\nMost recent memory: {}\n\nWrite exactly one vivid, surreal dream image (one sentence, no quotes, no preamble).",
+                        name_str, loc_name, personality, last_mem
+                    );
+                    let dream_seed = Some(self.seed.wrapping_add(self.llm_call_counter));
+                    self.llm_call_counter += 1;
+                    let llm = Arc::clone(&self.llm);
+                    match llm.generate(&dream_prompt, 60, dream_seed, None, None).await {
+                        Ok(text) => {
+                            let text = text.trim().to_string();
+                            if !text.is_empty() {
+                                let dream_mem = format!("Tick {tick} | Day {day} | {tod} | Dreamed: {text}");
+                                let buf = self.config.memory.buffer_size;
+                                self.agents[idx].push_memory(dream_mem, buf);
+                                Some(text)
+                            } else { None }
+                        }
+                        Err(_) => None,
+                    }
+                } else { None };
+
+                let outcome_line = if let Some(dream) = dream_outcome {
+                    format!("{} falls into a deep sleep and dreams: {}", self.agents[idx].name(), dream)
+                } else {
+                    format!("{} falls into a deep sleep.", self.agents[idx].name())
+                };
+
                 Ok(TickEntry {
                     agent_id:           idx,
                     agent_pos:          self.agents[idx].pos,
                     agent_name:         self.agents[idx].name().to_string(),
                     location:           loc_name.to_string(),
                     action_line:        "Sleep".to_string(),
-                    outcome_line:       format!("{} falls into a deep sleep.", self.agents[idx].name()),
+                    outcome_line,
                     outcome_tier_label: None,
                     llm_duration_ms:    None,
                     is_busy:            false,
@@ -1087,11 +1128,14 @@ impl World {
                 let storm_dc   = self.storm_dc_bonus();
                 let extra_dc   = neglect_dc + storm_dc;
 
+                // B6: specialty modifier
+                let spec_mod = Self::specialty_modifier(self.agents[idx].identity.specialty.as_deref(), &action);
+
                 let res = {
                     let attrs  = &self.agents[idx].attributes;
                     let needs  = &self.agents[idx].needs;
                     let config = &self.config;
-                    action::resolve(&action, attrs, needs, config, is_night, extra_dc, &mut self.rng)
+                    action::resolve(&action, attrs, needs, config, is_night, extra_dc, &mut self.rng, spec_mod)
                 };
 
                 if res.duration > 1 {
@@ -1286,11 +1330,15 @@ impl World {
         let storm_dc   = self.storm_dc_bonus();
         let extra_dc   = neglect_dc + storm_dc;
 
+        // B6: specialty modifier for chat
+        let chat_action = Action::Chat { target_name: target.to_string() };
+        let chat_spec_mod = Self::specialty_modifier(self.agents[idx].identity.specialty.as_deref(), &chat_action);
+
         let res = {
             let agent = &self.agents[idx];
             action::resolve(
-                &Action::Chat { target_name: target.to_string() },
-                &agent.attributes, &agent.needs, &self.config, is_night, extra_dc, &mut self.rng,
+                &chat_action,
+                &agent.attributes, &agent.needs, &self.config, is_night, extra_dc, &mut self.rng, chat_spec_mod,
             )
         };
 
@@ -2561,6 +2609,21 @@ Choose ONE action. Respond with ONLY a JSON object:
         )
     }
 
+    fn specialty_modifier(specialty: Option<&str>, action: &Action) -> i32 {
+        let Some(spec) = specialty else { return 0; };
+        let s = spec.to_lowercase();
+        let matches = match action {
+            Action::Fish        => s.contains("fish") || s.contains("angl"),
+            Action::Forage      => s.contains("forag") || s.contains("herb") || s.contains("gather"),
+            Action::Cook        => s.contains("cook") || s.contains("culin"),
+            Action::Exercise    => s.contains("athlet") || s.contains("fight") || s.contains("warrior") || s.contains("strength"),
+            Action::Explore     => s.contains("explor") || s.contains("scout") || s.contains("navigat"),
+            Action::Chat { .. } => s.contains("social") || s.contains("diplomac") || s.contains("charm") || s.contains("persuad"),
+            _ => false,
+        };
+        if matches { 2 } else { 0 }
+    }
+
     fn build_chat_prompt(&self, a_idx: usize, b_idx: usize) -> String {
         let a = &self.agents[a_idx];
         let b = &self.agents[b_idx];
@@ -2614,6 +2677,21 @@ Choose ONE action. Respond with ONLY a JSON object:
             }
         };
 
+        let a_aff = a.affinity.get(&b_name).copied().unwrap_or(0.0);
+        let b_aff = b.affinity.get(&a_name).copied().unwrap_or(0.0);
+        let avg_aff = (a_aff + b_aff) / 2.0;
+        let rel_label = if avg_aff > 60.0 {
+            "close friends"
+        } else if avg_aff > 20.0 {
+            "warm acquaintances"
+        } else if avg_aff < -60.0 {
+            "rivals"
+        } else if avg_aff < -20.0 {
+            "uneasy neighbors"
+        } else {
+            "acquaintances"
+        };
+
         let other_names: Vec<String> = self.agents.iter()
             .filter(|o| o.id != a_idx && o.id != b_idx)
             .map(|o| o.name().to_string())
@@ -2638,6 +2716,7 @@ Choose ONE action. Respond with ONLY a JSON object:
   Desires: {b_desires}
   Most recent memory: {b_mem}
 {beliefs_section}{warmth_note}
+Relationship: {rel_label}
 Write a brief realistic exchange (1-2 lines each), then a one-sentence summary.{gossip_hint}
 Respond ONLY with JSON — no other text:
 {{"summary": "one sentence topic, no names, no quotes", "exchange": "{a_name}: ...\n{b_name}: ...", "gossip": {{"about": "name or null", "content": "rumor text or null"}}}}
@@ -2654,6 +2733,7 @@ Respond ONLY with JSON — no other text:
             b_mem           = b_mem,
             beliefs_section = beliefs_section,
             warmth_note     = warmth_note,
+            rel_label       = rel_label,
             gossip_hint     = gossip_hint,
         )
     }

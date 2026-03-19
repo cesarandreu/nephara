@@ -220,14 +220,16 @@ pub fn action_attribute(action: &Action) -> &'static str {
 
 /// Resolve a non-magic action. Returns a Resolution.
 /// `extra_dc` is added to the effective DC (use for storm bonus, neglect debuff, etc.).
+/// `specialty_modifier` is added to the total roll (use for specialty bonus, etc.).
 pub fn resolve(
-    action:     &Action,
-    attributes: &Attributes,
-    needs:      &Needs,
-    config:     &Config,
-    is_night:   bool,
-    extra_dc:   u32,
-    rng:        &mut StdRng,
+    action:             &Action,
+    attributes:         &Attributes,
+    needs:              &Needs,
+    config:             &Config,
+    is_night:           bool,
+    extra_dc:           u32,
+    rng:                &mut StdRng,
+    specialty_modifier: i32,
 ) -> Resolution {
     let (cfg, attr_name) = action_cfg_and_attr(action, config);
     let base_dc          = effective_dc(action, cfg, is_night, config);
@@ -250,7 +252,7 @@ pub fn resolve(
     let roll     = rng.gen_range(1u32..=20);
     let modifier = attributes.modifier(attr_name);
     let penalty  = needs.penalty(config, attr_name);
-    let total    = roll as i32 + modifier + penalty;
+    let total    = roll as i32 + modifier + penalty + specialty_modifier;
 
     let tier = if roll == config.resolution.crit_fail {
         OutcomeTier::CriticalFail
@@ -264,10 +266,18 @@ pub fn resolve(
 
     let need_changes = base.scale(tier.multiplier());
 
-    debug!(target: "action",
-        action = %action.name(), roll = roll, modifier = modifier,
-        penalty = penalty, total = total, dc = dc, tier = ?tier,
-        "d20 resolution");
+    if specialty_modifier != 0 {
+        debug!(target: "action",
+            action = %action.name(), roll = roll, modifier = modifier,
+            penalty = penalty, specialty_modifier = specialty_modifier,
+            total = total, dc = dc, tier = ?tier,
+            "d20 resolution (with specialty bonus)");
+    } else {
+        debug!(target: "action",
+            action = %action.name(), roll = roll, modifier = modifier,
+            penalty = penalty, total = total, dc = dc, tier = ?tier,
+            "d20 resolution");
+    }
 
     Resolution {
         action: action.clone(),

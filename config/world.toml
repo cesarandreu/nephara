@@ -112,6 +112,7 @@ journal_n_runs = 3   # how many past run-day sections to load per agent
 # default_run_ticks    = 144   # 3 days
 default_run_ticks    = 96    # 2 days (for faster iteration)
 state_dump_interval  = 48    # Dump every in-game day
+tick_delay_ms        = 0     # ms to sleep between ticks (0 = as fast as possible)
 
 [llm]
 model                  = "gemma3:4b"

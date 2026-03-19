@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -113,6 +115,9 @@ pub struct TuiApp {
     active_tab:           u8,
     detail_selected:      usize,
     detail_scroll:        usize,
+    // A1: pause/resume + tick speed
+    paused:               Arc<AtomicBool>,
+    tick_delay_ms:        Arc<AtomicU64>,
 }
 
 impl TuiApp {
@@ -126,6 +131,8 @@ impl TuiApp {
         model_name:       String,
         roster:           Vec<(String, Color)>,
         god_name:         String,
+        paused:           Arc<AtomicBool>,
+        tick_delay_ms:    Arc<AtomicU64>,
     ) -> Self {
         TuiApp {
             map_cells:            vec![vec![], vec![]],
@@ -167,6 +174,8 @@ impl TuiApp {
             active_tab:           0,
             detail_selected:      0,
             detail_scroll:        0,
+            paused,
+            tick_delay_ms,
         }
     }
 
@@ -516,6 +525,22 @@ impl TuiApp {
             }
             (_, KeyCode::Char('l')) => { self.show_legend = !self.show_legend; }
             (_, KeyCode::Char('?')) => { self.show_help = !self.show_help; }
+            (_, KeyCode::Char('p')) => {
+                let was = self.paused.load(Ordering::Relaxed);
+                self.paused.store(!was, Ordering::Relaxed);
+            }
+            (_, KeyCode::Char('+')) | (_, KeyCode::Char('=')) => {
+                let levels: &[u64] = &[0, 100, 250, 500, 1000, 2000, 5000];
+                let cur = self.tick_delay_ms.load(Ordering::Relaxed);
+                let next = levels.iter().find(|&&v| v > cur).copied().unwrap_or(*levels.last().unwrap());
+                self.tick_delay_ms.store(next, Ordering::Relaxed);
+            }
+            (_, KeyCode::Char('-')) => {
+                let levels: &[u64] = &[0, 100, 250, 500, 1000, 2000, 5000];
+                let cur = self.tick_delay_ms.load(Ordering::Relaxed);
+                let prev = levels.iter().rev().find(|&&v| v < cur).copied().unwrap_or(0);
+                self.tick_delay_ms.store(prev, Ordering::Relaxed);
+            }
             (_, KeyCode::Char(c @ '1'..='5')) => {
                 let idx = (c as usize) - ('1' as usize);
                 if idx < self.agent_count {
@@ -581,8 +606,11 @@ impl TuiApp {
             .split(area);
 
         // Title bar
-        let status = if self.is_complete { "DONE" } else { "RUNNING" };
+        let is_paused = self.paused.load(Ordering::Relaxed);
+        let delay_val = self.tick_delay_ms.load(Ordering::Relaxed);
+        let status = if self.is_complete { "DONE" } else if is_paused { "PAUSED" } else { "RUNNING" };
         let lock_indicator = if self.scroll_locked && self.active_tab == 0 { "  [SCROLL LOCK — G to resume]" } else { "" };
+        let speed_indicator = if delay_val > 0 { format!("  +{}ms", delay_val) } else { String::new() };
         let tick_in_day = self.tick % self.ticks_per_day;
         let day_icon = if tick_in_day >= self.night_start_tick { "☾" } else { "☀" };
         let day_filled = ((tick_in_day as f32 / self.ticks_per_day as f32) * 8.0).round() as usize;
@@ -593,13 +621,17 @@ impl TuiApp {
         let tick_bar = format!("[{}{}]", "█".repeat(tick_filled.min(10)), "░".repeat(10 - tick_filled.min(10)));
         let tab_indicator = if self.active_tab == 0 { "[Tab→Agents]" } else { "[Tab→World]" };
         let title_text = format!(
-            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}  ✦ {}  {}",
+            " NEPHARA  model:{}  seed:{}  tick:{}/{} {}  Day {} {}  [{}]  {}{}{}  ✦ {}  {}",
             self.model_name, self.seed, self.tick, self.total_ticks, tick_bar,
-            self.day, day_bar, self.backend_name, status, lock_indicator,
+            self.day, day_bar, self.backend_name, status, lock_indicator, speed_indicator,
             self.god_name, tab_indicator
         );
-        let title = Paragraph::new(title_text)
-            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        let title_style = if is_paused {
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        };
+        let title = Paragraph::new(title_text).style(title_style);
         f.render_widget(title, outer[0]);
 
         if self.active_tab == 1 {
@@ -952,7 +984,7 @@ impl TuiApp {
 
     fn render_help_overlay(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let popup_width  = 50u16;
-        let popup_height = 15u16;
+        let popup_height = 20u16;
         let x = area.x + area.width.saturating_sub(popup_width) / 2;
         let y = area.y + area.height.saturating_sub(popup_height) / 2;
         let popup_area = Rect {
@@ -1006,6 +1038,14 @@ impl TuiApp {
             Line::from(vec![
                 Span::styled("  d", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
                 Span::raw("           LLM debug log"),
+            ]),
+            Line::from(vec![
+                Span::styled("  p", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("           Pause / resume simulation"),
+            ]),
+            Line::from(vec![
+                Span::styled("  + / -", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                Span::raw("     Increase / decrease tick speed"),
             ]),
         ];
 

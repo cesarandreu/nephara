@@ -151,6 +151,7 @@ pub struct MemoryConfig {
 pub struct SimulationConfig {
     pub default_run_ticks:   u32,
     pub state_dump_interval: u32,
+    pub tick_delay_ms:       u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -183,4 +184,53 @@ pub fn load(path: &str) -> Result<Config, Box<dyn std::error::Error + Send + Syn
     let config = toml::from_str(&content)
         .map_err(|e| format!("Cannot parse config '{}': {}", path, e))?;
     Ok(config)
+}
+
+/// Validate loaded config, returning a list of warning strings.
+/// Returns an error string if any value is critically invalid.
+pub fn validate(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Decay rates
+    for (name, val) in [
+        ("hunger",  config.needs.decay_per_tick.hunger),
+        ("energy",  config.needs.decay_per_tick.energy),
+        ("fun",     config.needs.decay_per_tick.fun),
+        ("social",  config.needs.decay_per_tick.social),
+        ("hygiene", config.needs.decay_per_tick.hygiene),
+    ] {
+        if val < 0.0 {
+            warnings.push(format!("needs.decay_per_tick.{} is negative ({})", name, val));
+        }
+        if val > 10.0 {
+            warnings.push(format!("needs.decay_per_tick.{} = {} is unusually high (>10)", name, val));
+        }
+    }
+
+    // DCs: check all action DCs are 0-30
+    for (name, dc) in [
+        ("cook",     config.actions.cook.dc),
+        ("forage",   config.actions.forage.dc),
+        ("fish",     config.actions.fish.dc),
+        ("exercise", config.actions.exercise.dc),
+        ("chat",     config.actions.chat.dc),
+        ("explore",  config.actions.explore.dc),
+    ] {
+        if dc > 30 {
+            warnings.push(format!("actions.{}.dc = {} exceeds max reasonable value of 30", name, dc));
+        }
+    }
+
+    // thresholds sanity
+    let t = &config.needs.thresholds;
+    if t.forced_action >= t.penalty_severe {
+        warnings.push(format!("forced_action threshold ({}) >= penalty_severe ({}) — needs logic may misbehave",
+            t.forced_action, t.penalty_severe));
+    }
+    if t.penalty_severe >= t.penalty_mild {
+        warnings.push(format!("penalty_severe threshold ({}) >= penalty_mild ({}) — needs logic may misbehave",
+            t.penalty_severe, t.penalty_mild));
+    }
+
+    warnings
 }

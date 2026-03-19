@@ -1,5 +1,8 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tracing::warn;
 
 use crate::log as runlog;
@@ -28,12 +31,14 @@ fn extract_prayer_text(action_line: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub async fn run_simulation(
-    tx:           mpsc::Sender<TuiEvent>,
-    mut world:    World,
-    total_ticks:  u32,
-    seed:         u64,
-    backend_name: String,
-    souls_dir:    String,
+    tx:             mpsc::Sender<TuiEvent>,
+    mut world:      World,
+    total_ticks:    u32,
+    seed:           u64,
+    backend_name:   String,
+    souls_dir:      String,
+    paused:         Arc<AtomicBool>,
+    tick_delay_ms:  Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Banner to file
     world.run_log.write_line(&format!(
@@ -56,6 +61,11 @@ pub async fn run_simulation(
     let _ = tx.send(TuiEvent::NeedsUpdate(world.agent_needs_snapshots())).await;
 
     for _t in 0..total_ticks {
+        // Pause loop
+        while paused.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(16)).await;
+        }
+
         let tick_num = world.tick_num;
         let tpd      = world.config.time.ticks_per_day;
         let day      = tick_num / tpd + 1;
@@ -148,6 +158,12 @@ pub async fn run_simulation(
         // State dump (single file, overwritten each interval)
         if result.tick > 0 && result.tick % world.config.simulation.state_dump_interval == 0 {
             runlog::write_state_dump(&world.run_log.run_id, &world.agents, seed);
+        }
+
+        // Tick delay (for pace control)
+        let delay = tick_delay_ms.load(Ordering::Relaxed);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
         }
     }
 

@@ -27,6 +27,7 @@ pub struct AgentIdentity {
     pub backstory:        String,
     pub magical_affinity: String,
     pub self_declaration: String,
+    pub specialty:        Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +248,7 @@ impl Agent {
                 backstory:        soul.backstory.clone(),
                 magical_affinity: soul.magical_affinity.clone(),
                 self_declaration: soul.self_declaration.clone(),
+                specialty:        soul.specialty.clone(),
             },
             attributes: Attributes {
                 vigor: soul.vigor,
