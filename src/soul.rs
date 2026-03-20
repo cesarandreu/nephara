@@ -114,6 +114,37 @@ fn parse_kv(frontmatter: &str) -> HashMap<String, String> {
     map
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_all_returns_souls_with_valid_attributes() {
+        let souls = load_all("souls").expect("souls/ directory should exist and be parseable");
+        assert!(!souls.is_empty(), "must have at least one soul seed");
+        for soul in &souls {
+            let sum = soul.vigor + soul.wit + soul.grace + soul.heart + soul.numen;
+            assert_eq!(sum, 30, "attributes for {} must sum to 30, got {}", soul.name, sum);
+            assert!(!soul.name.is_empty(), "soul name must not be empty");
+            assert!(!soul.personality.is_empty(), "personality must not be empty for {}", soul.name);
+        }
+    }
+
+    #[test]
+    fn parse_minimal_seed() {
+        let content = "---\nname: Test\nvigor: 6\nwit: 6\ngrace: 6\nheart: 6\nnumen: 6\n---\n## Personality\nCurious.\n## Backstory\nUnknown.\n## Magical Affinity\nNone.\n## Self-Declaration\nI am Test.";
+        let soul = parse(content).expect("minimal seed should parse");
+        assert_eq!(soul.name, "Test");
+        assert_eq!(soul.vigor + soul.wit + soul.grace + soul.heart + soul.numen, 30);
+    }
+
+    #[test]
+    fn parse_rejects_wrong_attribute_sum() {
+        let content = "---\nname: Bad\nvigor: 1\nwit: 1\ngrace: 1\nheart: 1\nnumen: 1\n---\n";
+        assert!(parse(content).is_err(), "should reject attribute sum != 30");
+    }
+}
+
 fn parse_sections(body: &str) -> HashMap<String, String> {
     let mut sections: HashMap<String, String> = HashMap::new();
     let mut current: Option<String>           = None;

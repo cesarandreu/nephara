@@ -3639,3 +3639,39 @@ fn build_grid(n_agents: usize) -> [[TileType; GRID_W]; GRID_H] {
 
     g
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn smoke_three_ticks_with_mock() {
+        let config = crate::config::load("config/world.toml")
+            .expect("config/world.toml should load");
+        let seeds = crate::soul::load_all("souls")
+            .expect("souls/ directory should be parseable");
+
+        let rng      = StdRng::seed_from_u64(42);
+        let mock     = Arc::new(crate::llm::MockBackend::new(StdRng::seed_from_u64(42)));
+        let run_log  = crate::log::RunLog::new_test();
+
+        let mut world = World::new(
+            seeds,
+            config,
+            42,
+            rng,
+            mock.clone(),
+            mock,
+            run_log,
+            "souls".to_string(),
+            true,
+        ).expect("World::new should succeed");
+
+        for _ in 0..3 {
+            world.tick().await.expect("tick should not error");
+        }
+        assert_eq!(world.tick_num, 3);
+    }
+}

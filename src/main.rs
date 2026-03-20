@@ -22,7 +22,7 @@ use rand::{Rng, SeedableRng};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use llm::{ClaudeBackend, LlmBackend, MockBackend, OllamaBackend, OpenAICompatBackend};
+use llm::{ClaudeBackend, ClaudeCliBackend, LlmBackend, MockBackend, OllamaBackend, OpenAICompatBackend};
 use log::RunLog;
 use world::World;
 
@@ -165,6 +165,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             info!("Using ClaudeBackend — model: {}", model);
             Arc::new(ClaudeBackend::new(model).map_err(|e| { error!("{}", e); e })?)
         }
+        "claude-cli" => {
+            let model = cli.model.as_deref()
+                .unwrap_or("claude-haiku-4-5-20251001")
+                .to_string();
+            info!("Using ClaudeCliBackend — model: {}", model);
+            Arc::new(ClaudeCliBackend::new(model))
+        }
         "ollama" => {
             info!("Using OllamaBackend — model: {}, url: {}", cfg.llm.model, cfg.llm.ollama_url);
             let ollama = OllamaBackend::new(
@@ -197,7 +204,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Smart backend ---
     let smart_backend: Arc<dyn LlmBackend> = match cli.llm.as_str() {
-        "mock" | "claude" | "llamacpp" | "openai" => Arc::clone(&backend),
+        "mock" | "claude" | "claude-cli" | "llamacpp" | "openai" => Arc::clone(&backend),
         _ => match &cfg.llm.smart_model.clone() {
             Some(model) => {
                 let smart_url = cfg.llm.smart_ollama_url.clone()

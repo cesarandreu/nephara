@@ -195,13 +195,12 @@ impl LlmBackend for OllamaBackend {
                     let token = c.message.content;
                     let new_thinking = c.message.thinking.len();
 
-                    // FEAT-10: Thinking budget abort
+                    // FEAT-10: Thinking budget (warn only, keep streaming)
                     if content.is_empty() && new_thinking > 0 {
                         thinking_chars += new_thinking;
                         if let Some(budget) = self.thinking_budget_chars {
                             if thinking_chars > budget {
-                                warn!(target: "llm", thinking_chars, budget, "thinking budget exceeded, aborting");
-                                return Ok(String::new());
+                                warn!(target: "llm", thinking_chars, budget, "thinking budget exceeded");
                             }
                         }
                         continue;
@@ -306,7 +305,7 @@ struct OAIRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format:     Option<OAIResponseFormat<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_forced_off: Option<bool>,
+    chat_template_kwargs: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -363,9 +362,9 @@ impl LlmBackend for OpenAICompatBackend {
             json_schema: OAIJsonSchema { name: "response", schema: s },
         });
 
-        // think: Some(false) → disable chain-of-thought via thinking_forced_off
-        let thinking_forced_off = match self.think {
-            Some(false) => Some(true),
+        // think: Some(false) → disable Qwen3 thinking via chat_template_kwargs
+        let chat_template_kwargs = match self.think {
+            Some(false) => Some(serde_json::json!({"enable_thinking": false})),
             _           => None,
         };
 
@@ -377,7 +376,7 @@ impl LlmBackend for OpenAICompatBackend {
             max_tokens,
             seed:        seed.map(|s| s as i64),
             response_format,
-            thinking_forced_off,
+            chat_template_kwargs,
         };
 
         debug!(target: "llm", model = %self.model, max_tokens = max_tokens,
@@ -423,14 +422,13 @@ impl LlmBackend for OpenAICompatBackend {
                             .as_deref().unwrap_or("").len();
                         let token = choice.delta.content.unwrap_or_default();
 
-                        // Thinking budget abort (mirrors Ollama backend logic)
+                        // Thinking budget (warn only, keep streaming)
                         if content.is_empty() && new_thinking > 0 {
                             thinking_chars += new_thinking;
                             if let Some(budget) = self.thinking_budget_chars {
                                 if thinking_chars > budget {
                                     warn!(target: "llm", thinking_chars, budget,
-                                          "thinking budget exceeded, aborting");
-                                    return Ok(String::new());
+                                          "thinking budget exceeded");
                                 }
                             }
                             continue;
@@ -577,6 +575,65 @@ impl LlmBackend for ClaudeBackend {
             .ok_or("No text content in Claude response")?;
 
         debug!(target: "llm", chars = text.len(), response = %text, "Claude response");
+        Ok(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Claude CLI backend — shells out to `claude -p --model <model>`
+// ---------------------------------------------------------------------------
+
+pub struct ClaudeCliBackend {
+    model: String,
+}
+
+impl ClaudeCliBackend {
+    pub fn new(model: String) -> Self {
+        ClaudeCliBackend { model }
+    }
+}
+
+#[async_trait]
+impl LlmBackend for ClaudeCliBackend {
+    async fn generate(
+        &self,
+        prompt:     &str,
+        _max_tokens: u32,
+        _seed:      Option<u64>,
+        _schema:    Option<&serde_json::Value>,
+        _token_tx:  Option<UnboundedSender<String>>,
+    ) -> Result<String> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        debug!(target: "llm", model = %self.model, prompt_chars = prompt.len(), "Claude CLI request");
+
+        let mut child = Command::new("claude")
+            .args(["-p", "--model", &self.model])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn claude CLI: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(prompt.as_bytes()).await
+                .map_err(|e| format!("Failed to write to claude CLI stdin: {}", e))?;
+        }
+
+        let output = child.wait_with_output().await
+            .map_err(|e| format!("Claude CLI wait error: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Claude CLI exited with {}: {}", output.status, stderr.trim()).into());
+        }
+
+        let text = String::from_utf8(output.stdout)
+            .map_err(|e| format!("Claude CLI output UTF-8 error: {}", e))?;
+        let text = text.trim().to_string();
+
+        debug!(target: "llm", chars = text.len(), response = %text, "Claude CLI response");
         Ok(text)
     }
 }

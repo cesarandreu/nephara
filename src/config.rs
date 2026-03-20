@@ -249,3 +249,22 @@ pub fn validate(config: &Config) -> Vec<String> {
 
     warnings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_config_succeeds() {
+        let cfg = load("config/world.toml").expect("config/world.toml should load");
+        assert!(cfg.time.ticks_per_day > 0, "ticks_per_day must be > 0");
+        assert!(cfg.simulation.default_run_ticks > 0, "default_run_ticks must be > 0");
+    }
+
+    #[test]
+    fn validate_config_no_errors() {
+        let cfg = load("config/world.toml").expect("config/world.toml should load");
+        let warnings = validate(&cfg);
+        assert!(warnings.is_empty(), "unexpected config warnings: {:?}", warnings);
+    }
+}

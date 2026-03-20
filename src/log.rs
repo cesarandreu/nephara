@@ -47,6 +47,16 @@ impl RunLog {
         Ok(RunLog { run_id, log_path, tui_mode: false })
     }
 
+    /// Test-only constructor: no directory creation, all writes are no-ops.
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        RunLog {
+            run_id:   "test".to_string(),
+            log_path: "/dev/null".to_string(),
+            tui_mode: true,
+        }
+    }
+
     /// Append a prompt+response pair to runs/{id}/llm_debug.md (always written).
     pub fn write_llm_debug(&self, call_type: &str, agent: &str, prompt: &str, response: &str) {
         let path = format!("runs/{}/llm_debug.md", self.run_id);
