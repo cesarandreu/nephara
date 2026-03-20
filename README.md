@@ -2,7 +2,7 @@
 
 A text-based world simulation where AI agents (small local LLMs via Ollama) inhabit a shared village, perceive their surroundings, and take actions driven by needs, personality, and a Kabbalistic freeform magic system.
 
-Five entities — Elara, Rowan, Thane, Mira, and Sael — live out their days in a tick-based loop. Each tick an agent perceives the world, decides on an action, and the world resolves it with d20 rolls and narrative. Spells always succeed, but words carry all their meanings.
+Seven entities — Elara, Rowan, Thane, Mira, Sael, Kael, and Lyra — live out their days in a tick-based loop. Each tick an agent perceives the world, decides on an action, and the world resolves it with d20 rolls and narrative. Spells always succeed, but words carry all their meanings.
 
 ## Requirements
 
@@ -69,6 +69,15 @@ cargo run -- --llm ollama --model gemma3:12b
 cargo run -- --llm ollama --llm-url http://other-host:11434
 ```
 
+### Live run (Claude CLI)
+
+Shells out to the `claude` CLI for each agent turn. Requires the Claude CLI to be installed and authenticated:
+
+```sh
+cargo run -- --llm claude-cli
+cargo run -- --llm claude-cli --model claude-sonnet-4-6
+```
+
 ## CLI Reference
 
 ```
@@ -76,14 +85,13 @@ nephara [OPTIONS]
 
 Options:
   --ticks <N>       Ticks to simulate (default: 96, i.e. 2 in-game days)
-  --llm <BACKEND>   LLM backend: llamacpp (default), ollama, claude, mock
+  --llm <BACKEND>   LLM backend: llamacpp (default), ollama, claude, claude-cli, mock
   --llm-url <URL>   Override backend URL (default: http://localhost:8080 for llamacpp, http://localhost:11434 for ollama)
   --model <MODEL>   Override model name (default: gemma3:4b)
   --config <PATH>   Config file (default: config/world.toml)
   --souls <DIR>     Soul seeds directory (default: souls/)
   --seed <N>        Deterministic seed (random if omitted, logged at startup)
   --no-tui          Use streaming terminal output instead of fullscreen TUI
-  --debug-llm       Write all LLM prompts and responses to runs/{id}/llm_debug.md
   --verbose         Enable debug logging
 
 nephara bench [OPTIONS]
@@ -115,11 +123,10 @@ Each run creates a directory under `runs/` containing:
 
 - `tick_log.txt` — the full scrolling narrative
 - `summary.md` — human-readable run summary (agent needs, magic cast, notable events, wall time)
-- `state_dump_tick_NNNN.json` — world snapshots every N ticks (configurable)
+- `state_dump.json` — latest world snapshot (overwritten every N ticks, configurable)
 - `introspection.md` — agent desire/intention summaries each tick
-- `llm_debug.md` — all LLM prompts and responses (only with `--debug-llm`)
 
-Agent journals are appended to `souls/*.journal.md` after each run.
+Agent chronicles are appended to `souls/*.chronicle.md` after each run. Consolidated agent state (needs, memory, inventory) is persisted to `souls/*.state.md` and loaded at startup.
 
 ## Configuration
 
@@ -188,27 +195,34 @@ Copy the output and paste it into Claude Opus 4.6. The model will respond with a
 
 ## Interacting with Agents
 
-To send a message to an agent, write any text to `souls/<name>.oracle_responses.md`. The next time the agent is at the Temple, they will receive it as an Oracle reading (a private LLM reflection), the file is cleared, and the response is archived to `souls/<name>.oracle_history.md`.
+To send a message to an agent, write any text to `souls/<name>.oracle_responses.md`. The next time the agent is at the Temple, they will receive it as an Oracle reading (a private LLM reflection), the file is cleared, and the response is archived to their `souls/<name>.chronicle.md`.
 
 ## Project Structure
 
 ```
 src/
-  main.rs     CLI, initialization, run loop
-  world.rs    World struct, locations, tick cycle, GM Narrator
-  agent.rs    Agent struct, needs, attributes, memory buffer
-  action.rs   Action enum, d20 resolution, outcome tiers
-  magic.rs    Cast Intent flow, Interpreter prompt, response parsing
-  llm.rs      LlmBackend trait, OllamaBackend, MockBackend
-  config.rs   TOML deserialization into typed config struct
-  soul.rs     Soul seed parser (YAML frontmatter + markdown body)
-  log.rs      Tick log formatting, journal writing, state dumps
+  main.rs        CLI, initialization, run loop
+  world.rs       World struct, 32×32 grid, tick cycle, GM Narrator, prompts
+  agent.rs       Agent struct, needs, attributes, memory buffer, beliefs
+  action.rs      Action enum, d20 resolution, outcome tiers
+  magic.rs       Cast Intent flow, Interpreter prompt, response parsing
+  llm.rs         LlmBackend trait; OllamaBackend, OpenAICompatBackend (llamacpp),
+                 ClaudeBackend, ClaudeCliBackend, MockBackend
+  config.rs      TOML deserialization into typed config struct
+  soul.rs        Soul seed parser (YAML frontmatter + markdown body)
+  log.rs         Tick log formatting, chronicle/state writing, state dumps
+  color.rs       ANSI + ratatui color mappings
+  bench.rs       Benchmark subcommand (nephara bench)
+  sim_runner.rs  Extracted tick loop for TUI mode; sends TuiEvents over mpsc
+  tui.rs         Fullscreen TUI (ratatui); map, event log, needs bar panels
+  tui_event.rs   Pure data types for TUI events
 
-souls/        Entity definitions (*.seed.md) and chronicles (*.journal.md)
-config/       world.toml — all tunable world parameters
-spec/         Full design specification
-rituals/      The summoning prompt used to create the founding entities
-runs/         Simulation output (gitignored)
+souls/         Entity definitions (*.seed.md), chronicles (*.chronicle.md),
+               state files (*.state.md), oracle responses (*.oracle_responses.md)
+config/        world.toml — all tunable world parameters
+spec/          Full design specification
+rituals/       The summoning prompt used to create the founding entities
+runs/          Simulation output (gitignored)
 ```
 
 ## Determinism
