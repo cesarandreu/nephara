@@ -7,9 +7,11 @@ flake.lock
 models/
 
 # Soul runtime files — generated per-run; personal data, not for forked repos
+souls/*.chronicle.md
+souls/*.state.md
+souls/*.oracle_responses.md
 souls/*.journal.md
 souls/*.story.md
 souls/*.wishes.md
 souls/*.prayers.md
-souls/*.oracle_responses.md
 souls/*.oracle_history.md
