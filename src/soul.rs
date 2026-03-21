@@ -75,9 +75,12 @@ pub fn parse(content: &str) -> Result<SoulSeed, Box<dyn std::error::Error + Send
         ).into());
     }
 
+    let name = get("name")?;
+    validate_name_safe(&name)?;
+
     let sections = parse_sections(&body);
     Ok(SoulSeed {
-        name:             get("name")?,
+        name,
         vigor, wit, grace, heart, numen,
         specialty:    fm.get("specialty").map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string()).filter(|s| !s.is_empty()),
         personality:  sections.get("Personality").cloned().unwrap_or_default(),
@@ -85,6 +88,28 @@ pub fn parse(content: &str) -> Result<SoulSeed, Box<dyn std::error::Error + Send
         magical_affinity: sections.get("Magical Affinity").cloned().unwrap_or_default(),
         self_declaration: sections.get("Self-Declaration").cloned().unwrap_or_default(),
     })
+}
+
+/// Reject names that could escape the souls directory when used as path components.
+/// Names must be non-empty and must not contain path separators (`/`, `\`)
+/// or any occurrence of the parent-directory token (`..`).
+fn validate_name_safe(name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if name.is_empty() {
+        return Err("Soul name must not be empty".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "Soul name '{}' contains a path separator — names must not include '/' or '\\'",
+            name
+        ).into());
+    }
+    if name.contains("..") {
+        return Err(format!(
+            "Soul name '{}' contains '..' which is not allowed in soul names",
+            name
+        ).into());
+    }
+    Ok(())
 }
 
 fn split_frontmatter(
@@ -142,6 +167,35 @@ mod tests {
     fn parse_rejects_wrong_attribute_sum() {
         let content = "---\nname: Bad\nvigor: 1\nwit: 1\ngrace: 1\nheart: 1\nnumen: 1\n---\n";
         assert!(parse(content).is_err(), "should reject attribute sum != 30");
+    }
+
+    #[test]
+    fn parse_rejects_name_with_path_separator() {
+        let traversal_seed = "---\nname: ../evil\nvigor: 6\nwit: 6\ngrace: 6\nheart: 6\nnumen: 6\n---\n## Personality\nEvil.\n## Backstory\nN/A.\n## Magical Affinity\nNone.\n## Self-Declaration\nI escape.";
+        assert!(parse(traversal_seed).is_err(), "should reject name with path traversal");
+    }
+
+    #[test]
+    fn parse_rejects_name_with_forward_slash() {
+        let slash_seed = "---\nname: a/b\nvigor: 6\nwit: 6\ngrace: 6\nheart: 6\nnumen: 6\n---\n## Personality\nX.\n## Backstory\nX.\n## Magical Affinity\nX.\n## Self-Declaration\nX.";
+        assert!(parse(slash_seed).is_err(), "should reject name containing '/'");
+    }
+
+    #[test]
+    fn validate_name_safe_accepts_normal_names() {
+        assert!(validate_name_safe("Elara").is_ok());
+        assert!(validate_name_safe("Rowan the Swift").is_ok());
+        assert!(validate_name_safe("Agent-7").is_ok());
+    }
+
+    #[test]
+    fn validate_name_safe_rejects_traversal_sequences() {
+        assert!(validate_name_safe("..").is_err());
+        assert!(validate_name_safe("../etc").is_err());
+        assert!(validate_name_safe("foo..bar").is_err());
+        assert!(validate_name_safe("a/b").is_err());
+        assert!(validate_name_safe("a\\b").is_err());
+        assert!(validate_name_safe("").is_err());
     }
 }
 

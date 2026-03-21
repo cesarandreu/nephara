@@ -90,7 +90,7 @@ pub async fn run_simulation(
 
         // Drain god messages and inject into world
         {
-            let mut queue = god_queue.lock().unwrap();
+            let mut queue = god_queue.lock().unwrap_or_else(|e| e.into_inner());
             if !queue.is_empty() {
                 let msgs: Vec<GodMessage> = queue.drain(..).collect();
                 world.inject_god_messages(msgs);

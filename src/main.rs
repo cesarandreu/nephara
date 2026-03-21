@@ -188,7 +188,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 cfg.llm.temperature,
                 cfg.llm.think,
                 cfg.llm.thinking_budget_chars,
-            );
+            ).map_err(|e| { error!("{}", e); e })?;
             if let Err(e) = ollama.health_check().await {
                 error!("{}", e);
                 std::process::exit(1);
@@ -204,7 +204,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 cfg.llm.temperature,
                 cfg.llm.think,
                 cfg.llm.thinking_budget_chars,
-            );
+            ).map_err(|e| { error!("{}", e); e })?;
             llamacpp.health_check().await;  // warn but don't abort
             Arc::new(llamacpp)
         }
@@ -217,14 +217,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Some(model) => {
                 let smart_url = cfg.llm.smart_ollama_url.clone()
                     .unwrap_or_else(|| cfg.llm.ollama_url.clone());
-                let smart = OllamaBackend::new(smart_url, model.clone(), cfg.llm.temperature, cfg.llm.think, cfg.llm.thinking_budget_chars);
-                match smart.health_check().await {
-                    Ok(_)  => {
-                        info!("Smart model '{}' available for planning/reflection/desires", model);
-                        Arc::new(smart) as Arc<dyn LlmBackend>
-                    }
+                match OllamaBackend::new(smart_url, model.clone(), cfg.llm.temperature, cfg.llm.think, cfg.llm.thinking_budget_chars) {
+                    Ok(smart) => match smart.health_check().await {
+                        Ok(_)  => {
+                            info!("Smart model '{}' available for planning/reflection/desires", model);
+                            Arc::new(smart) as Arc<dyn LlmBackend>
+                        }
+                        Err(e) => {
+                            warn!("Smart model '{}' unavailable: {}. Falling back to main model.", model, e);
+                            Arc::clone(&backend)
+                        }
+                    },
                     Err(e) => {
-                        warn!("Smart model '{}' unavailable: {}. Falling back to main model.", model, e);
+                        warn!("Smart model '{}' client build failed: {}. Falling back to main model.", model, e);
                         Arc::clone(&backend)
                     }
                 }

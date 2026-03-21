@@ -398,7 +398,7 @@ impl TuiApp {
                     let text = self.god_input_text.trim().to_string();
                     if !text.is_empty() {
                         let msg = GodMessage { target: self.god_input_target.clone(), text };
-                        let mut q = self.god_queue.lock().unwrap();
+                        let mut q = self.god_queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.push_back(msg);
                     }
                     self.god_input_active = false;
