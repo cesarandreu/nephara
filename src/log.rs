@@ -259,9 +259,13 @@ pub fn write_state_dump(
         })).collect::<Vec<_>>(),
     });
 
-    match fs::write(&path, serde_json::to_string_pretty(&state).unwrap_or_default()) {
-        Ok(_)  => {},
-        Err(e) => warn!("Could not write state dump to {}: {}", path, e),
+    match serde_json::to_string_pretty(&state) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&path, json) {
+                warn!("Could not write state dump to {}: {}", path, e);
+            }
+        }
+        Err(e) => warn!("Could not serialize state dump for {}: {}", path, e),
     }
 }
 
