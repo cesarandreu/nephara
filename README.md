@@ -4,6 +4,8 @@ A text-based world simulation where AI agents (small local LLMs via Ollama) inha
 
 Seven entities — Elara, Rowan, Thane, Mira, Sael, Kael, and Lyra — live out their days in a tick-based loop. Each tick an agent perceives the world, decides on an action, and the world resolves it with d20 rolls and narrative. Spells always succeed, but words carry all their meanings.
 
+**New here?** See the [Getting Started guide](docs/getting-started.md).
+
 ## Requirements
 
 - [Nix](https://nixos.org/) with flakes enabled
