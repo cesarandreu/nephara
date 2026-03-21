@@ -2,7 +2,7 @@
 
 Nephara is a text-based world simulation. Seven AI agents live in a small village, perceiving their surroundings and choosing actions driven by needs, personality, and a freeform magic system inspired by Kabbalah. You don't play a character — you run the simulation and watch emergent stories unfold, like directing a theater troupe of autonomous minds. You can influence the world in limited ways (see [Ways to nudge the world](#ways-to-nudge-the-world) below), but the agents decide what to do.
 
-For the full design spec, see [spec/world-sim-mvp-spec.md](../spec/world-sim-mvp-spec.md).
+For the full design spec, see [spec/world-sim-mvp-spec.md](../spec/world-sim-mvp-spec.md). For a detailed walkthrough of the simulation's runtime flow with diagrams, see [simulation-flow.md](simulation-flow.md).
 
 ## Requirements
 
