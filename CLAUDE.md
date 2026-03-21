@@ -10,7 +10,7 @@ Nephara is a text-based world simulation where AI agents (embodied by small loca
 
 - **Language:** Rust (stable toolchain)
 - **Async runtime:** Tokio
-- **LLM serving:** llama.cpp (OpenAI-compatible, localhost:8080, default), Ollama (localhost:11434), or Claude API
+- **LLM serving:** `llm` CLI tool (preferred, any model), llama.cpp (OpenAI-compatible, localhost:8080, default), Ollama (localhost:11434), or Claude API
 - **Config:** TOML (`config/world.toml`)
 - **OS:** NixOS — all dependencies declared in `flake.nix`
 - **GPU:** AMD Vega Frontier Edition (ROCm), but code is GPU-agnostic
@@ -72,13 +72,21 @@ nephara [OPTIONS]
 
 Options:
   --ticks <N>         Number of ticks to simulate (default: from config)
-  --llm <BACKEND>     LLM backend: llamacpp (default), ollama, claude, mock
-  --llm-url <URL>     Override Ollama URL
+  --llm <BACKEND>     LLM backend: llamacpp (default), llm (preferred), ollama, claude, claude-cli, mock
+  --llm-url <URL>     Override backend URL
   --model <MODEL>     Override model name
   --config <PATH>     Config file path (default: config/world.toml)
   --souls <DIR>       Soul seeds directory (default: souls/)
   --verbose           Enable debug logging
 ```
+
+## Running Tests
+
+```bash
+nix develop --command cargo test
+```
+
+All tests use `MockBackend` — no LLM, Ollama, or network required. Tests are in `#[cfg(test)]` blocks inside each source module. The `is_test_run = true` flag suppresses all file I/O (soul chronicles, state files, etc.).
 
 ## Things NOT To Do
 

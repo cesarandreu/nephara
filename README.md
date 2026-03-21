@@ -69,6 +69,24 @@ cargo run -- --llm ollama --model gemma3:12b
 cargo run -- --llm ollama --llm-url http://other-host:11434
 ```
 
+### Live run (llm CLI — preferred)
+
+The `llm` backend shells out to Simon Willison's [`llm`](https://llm.datasette.io/) CLI tool, which supports hundreds of models (Gemini, OpenAI, Anthropic, local via plugins) through a single interface. This is the preferred backend for live runs.
+
+Install it and add a model key, then:
+
+```sh
+cargo run -- --llm llm
+cargo run -- --llm llm --model gemini-2.0-flash:free
+cargo run -- --llm llm --model gpt-4o-mini
+```
+
+For free-tier APIs (e.g. Gemini free tier), set `rate_limit_rpm` in `config/world.toml` to stay under the rate limit:
+
+```toml
+rate_limit_rpm = 15   # requests per minute; 0 = unlimited
+```
+
 ### Live run (Claude CLI)
 
 Shells out to the `claude` CLI for each agent turn. Requires the Claude CLI to be installed and authenticated:
@@ -85,7 +103,7 @@ nephara [OPTIONS]
 
 Options:
   --ticks <N>       Ticks to simulate (default: 96, i.e. 2 in-game days)
-  --llm <BACKEND>   LLM backend: llamacpp (default), ollama, claude, claude-cli, mock
+  --llm <BACKEND>   LLM backend: llamacpp (default), llm, ollama, claude, claude-cli, mock
   --llm-url <URL>   Override backend URL (default: http://localhost:8080 for llamacpp, http://localhost:11434 for ollama)
   --model <MODEL>   Override model name (default: gemma3:4b)
   --config <PATH>   Config file (default: config/world.toml)
@@ -140,7 +158,7 @@ These commands run inside the `nix develop` shell, which provides `cargo` and al
 # Build
 cargo build
 
-# Run tests
+# Run tests (no LLM or network required — MockBackend only)
 cargo test
 
 # Check for warnings/errors without producing a binary
