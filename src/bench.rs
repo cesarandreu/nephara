@@ -85,7 +85,7 @@ pub async fn run_bench(
 
     for model in &config.models {
         println!("── {} ──", model);
-        let backend = OllamaBackend::new(config.ollama_url.clone(), model.clone(), 0.7, None, None);
+        let backend = OllamaBackend::new(config.ollama_url.clone(), model.clone(), 0.7, None, None)?;
 
         let action_res = bench_prompt_type(
             &backend, ACTION_PROMPT, 150, Some(&action_schema), config.samples, "action",

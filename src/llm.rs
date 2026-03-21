@@ -9,6 +9,14 @@ use tracing::{debug, info, warn};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// Default HTTP timeout for LLM API calls (5 minutes).  Long enough for slow local models
+/// running on CPU, short enough that a hung server will eventually be detected.
+const HTTP_TIMEOUT_SECS: u64 = 300;
+
+/// Maximum number of characters accumulated from a single LLM response stream.
+/// Prevents unbounded memory growth if a server returns an unexpectedly large body.
+const MAX_RESPONSE_CHARS: usize = 1_048_576; // 1 MiB
+
 // ---------------------------------------------------------------------------
 // Output sanitizer — applied to all backend responses before returning
 // ---------------------------------------------------------------------------
@@ -63,8 +71,12 @@ impl OllamaBackend {
         temperature:           f32,
         think:                 Option<bool>,
         thinking_budget_chars: Option<usize>,
-    ) -> Self {
-        OllamaBackend { url, model, temperature, think, thinking_budget_chars, client: reqwest::Client::new() }
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| format!("failed to build reqwest client: {}", e))?;
+        Ok(OllamaBackend { url, model, temperature, think, thinking_budget_chars, client })
     }
 }
 
@@ -226,6 +238,14 @@ impl LlmBackend for OllamaBackend {
                         }
                         content.push_str(&token);
 
+                        // Guard against unexpectedly large responses
+                        if content.len() > MAX_RESPONSE_CHARS {
+                            warn!(target: "llm", chars = content.len(),
+                                  limit = MAX_RESPONSE_CHARS, "response exceeded size limit, truncating");
+                            done = true;
+                            break 'outer;
+                        }
+
                         // FEAT-17: Early abort when JSON schema-constrained response is complete
                         if schema.is_some() && content.trim_end().ends_with('}') {
                             if serde_json::from_str::<serde_json::Value>(content.trim()).is_ok() {
@@ -284,8 +304,12 @@ impl OpenAICompatBackend {
         temperature:           f32,
         think:                 Option<bool>,
         thinking_budget_chars: Option<usize>,
-    ) -> Self {
-        OpenAICompatBackend { url, model, temperature, think, thinking_budget_chars, client: reqwest::Client::new() }
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| format!("failed to build reqwest client: {}", e))?;
+        Ok(OpenAICompatBackend { url, model, temperature, think, thinking_budget_chars, client })
     }
 
     pub async fn health_check(&self) {
@@ -454,6 +478,14 @@ impl LlmBackend for OpenAICompatBackend {
                             }
                             content.push_str(&token);
 
+                            // Guard against unexpectedly large responses
+                            if content.len() > MAX_RESPONSE_CHARS {
+                                warn!(target: "llm", chars = content.len(),
+                                      limit = MAX_RESPONSE_CHARS, "response exceeded size limit, truncating");
+                                done = true;
+                                break 'outer;
+                            }
+
                             // Early abort when JSON schema-constrained response is complete
                             if schema.is_some() && content.trim_end().ends_with('}') {
                                 if serde_json::from_str::<serde_json::Value>(content.trim()).is_ok() {
@@ -511,7 +543,11 @@ impl ClaudeBackend {
     pub fn new(model: String) -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
-        Ok(ClaudeBackend { api_key, model, client: reqwest::Client::new() })
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| format!("failed to build reqwest client: {}", e))?;
+        Ok(ClaudeBackend { api_key, model, client })
     }
 }
 
